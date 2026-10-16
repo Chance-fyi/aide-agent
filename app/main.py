@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes import router
+from app.api.debug_routes import register_debug_routes
 
 
 @asynccontextmanager
@@ -36,3 +37,4 @@ app = FastAPI(
 )
 
 app.include_router(router)
+register_debug_routes(app)  # 调试路由：debug=False 时不注册

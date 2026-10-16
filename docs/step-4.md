@@ -33,14 +33,36 @@
 ## 验证
 
 ```bash
+# 切块统计与抽样
 uv run python -c "
 from app.rag.splitter import load_and_split_all
 print(len(load_and_split_all('data/knowledge_base')))  # 31
 "
-# 语义排序验证：'怎么退货' 与退货块相似度 > 积分块
 ```
 
-## 遗留问题
+## 调试接口（app/api/debug_routes.py）
 
-- HuggingFace 下载慢时可设 `HF_ENDPOINT=https://hf-mirror.com`
-- 检索环节（Milvus 入库 + search_kb）在步骤 5 完成
+开发期验证工具，`DEBUG=false` 时不注册：
+
+- `GET /debug/kb/chunks`：切块统计（总数/长度分布/抽样）
+- `GET /debug/kb/search?q=...`：**内存版语义检索**——全部块向量缓存，
+  查询串与缓存向量算内积（归一化向量内积=余弦相似度），不依赖 Milvus
+
+实测召回效果：
+
+| 查询 | 命中 | 分数 |
+|---|---|---|
+| 怎么退货 | returns.md/退货流程 | 0.772 |
+| 退款多久到账 | refund.md/退款时效 | 0.731 |
+| 积分怎么用 | membership.md/积分规则 | 0.705 |
+
+步骤 5 接入 Milvus 后，正式 search_kb 的效果可与这里的内存检索对照。
+
+## 启动方式
+
+pyproject 已配置 `[tool.fastapi] entrypoint = "app.main:app"`，可用：
+
+```bash
+uv run fastapi dev      # 开发模式（热重载），依赖 fastapi[standard]
+uvicorn app.main:app    # 等价的传统方式
+```

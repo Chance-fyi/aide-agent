@@ -5,8 +5,8 @@ description = "客服 Agent：智能客服 + 知识库 RAG + 人工转接（Fast
 requires-python = ">=3.12"
 dependencies = [
     # Web 框架
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.34",
+    "fastapi[standard]>=0.115",   # 含 uvicorn + fastapi CLI
+    "fastapi[standard]>=0.115",
     # LangGraph 生态
     "langgraph>=0.4",
     "langgraph-checkpoint-postgres>=2.0",
@@ -48,3 +48,7 @@ target-version = "py312"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# fastapi 命令行（uv run fastapi dev）的入口配置，免每次手敲 app.main:app
+[tool.fastapi]
+entrypoint = "app.main:app"

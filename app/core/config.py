@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # 强制转人工关键词：LLM 判断之外的第二道保险（步骤 7 使用）
     transfer_keywords: str = "转人工,人工客服,投诉"
 
+    # 调试接口开关：生产环境置 false，调试路由不注册
+    debug: bool = True
+
     @property
     def postgres_dsn(self) -> str:
         """LangGraph Checkpointer 需要的连接串格式。"""
