@@ -1,11 +1,11 @@
-"""调试路由：验证切块与 embedding 效果（步骤 4 阶段的临时验证工具）。
+"""调试路由：知识库效果验证工具。
 
 仅当 settings.debug=True 时注册（见 main.py）。
-等步骤 5 Milvus 接入后，这里的内存检索会被正式的 search_kb 取代，
-但接口本身保留，作为"不依赖向量库的效果对照"很有价值。
 
-内存检索的实现：进程启动后首次调用时把所有块向量化并缓存，
-之后每次查询只向量化查询串，与缓存向量算内积（归一化向量：内积即余弦相似度）。
+/search 已切换为走正式的 Milvus 检索链路（store.search），
+保证调试接口看到的就是生产链路的真实效果。
+/memory_search 保留内存版实现，用于两者结果对照：
+两者分数一致说明检索链路口径一致，不一致则说明某条链路有问题。
 """
 
 from functools import lru_cache
@@ -13,6 +13,7 @@ from functools import lru_cache
 from fastapi import APIRouter, Query
 
 from app.core.config import get_settings
+from app.rag import store
 from app.rag.embedder import embed_query, embed_texts
 from app.rag.splitter import Chunk, load_and_split_all
 
@@ -29,7 +30,7 @@ def _load_chunks() -> tuple[Chunk, ...]:
 
 @lru_cache
 def _chunk_vectors() -> tuple[list[float], ...]:
-    """所有块的向量缓存：只在首次调用时算一次。"""
+    """所有块的向量缓存（仅内存版检索使用）。"""
     chunks = _load_chunks()
     return tuple(embed_texts([c.content for c in chunks]))
 
@@ -39,7 +40,7 @@ async def list_chunks(
     source: str | None = Query(default=None, description="按文件名过滤，如 returns.md"),
     limit: int = Query(default=5, le=50),
 ):
-    """查看切块结果：总块数、每块长度分布、抽样内容。用于人工检查切块质量。"""
+    """查看切块结果：总块数、长度分布、抽样内容。用于人工检查切块质量。"""
     chunks = _load_chunks()
     filtered = [c for c in chunks if source is None or c.source == source]
     return {
@@ -61,14 +62,34 @@ async def list_chunks(
 
 
 @router.get("/search")
+async def milvus_search(
+    q: str = Query(..., description="查询串"),
+    top_k: int = Query(default=3, le=10),
+):
+    """正式链路检索：走 Milvus（与生产 /chat 用的同一条路径）。"""
+    results = store.search(q, top_k=top_k)
+    return {
+        "query": q,
+        "backend": "milvus",
+        "results": [
+            {
+                "score": round(r["score"], 4),
+                "source": r["source"],
+                "h1": r["h1"],
+                "h2": r["h2"],
+                "content": r["content"],
+            }
+            for r in results
+        ],
+    }
+
+
+@router.get("/memory_search")
 async def memory_search(
     q: str = Query(..., description="查询串"),
     top_k: int = Query(default=3, le=10),
 ):
-    """内存版语义检索：验证 embedding 召回效果（不需要 Milvus）。
-
-    归一化向量的内积 = 余弦相似度，范围 [-1, 1]，越接近 1 越相关。
-    """
+    """内存版对照检索：不经过 Milvus，用于验证 Milvus 链路口径是否一致。"""
     chunks = _load_chunks()
     vectors = _chunk_vectors()
     qv = embed_query(q)
@@ -81,11 +102,19 @@ async def memory_search(
     )
     return {
         "query": q,
+        "backend": "memory",
         "results": [
             {"score": round(score, 4), "source": c.source, "h1": c.h1, "h2": c.h2, "content": c.content}
             for score, c in scored[:top_k]
         ],
     }
+
+
+@router.post("/rebuild")
+async def rebuild():
+    """触发知识库全量重建（改了语料后调用，无需重启服务）。"""
+    count = store.rebuild_index(KB_DIR)
+    return {"status": "ok", "chunks": count}
 
 
 def register_debug_routes(app) -> None:

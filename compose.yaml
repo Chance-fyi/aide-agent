@@ -70,6 +70,18 @@ services:
       retries: 12
       start_period: 40s
 
+  # ---------- Attu：Milvus 官方 GUI，浏览器查看集合/数据/索引 ----------
+  attu:
+    image: docker.io/zilliz/attu:v2.5
+    container_name: aide-attu
+    environment:
+      MILVUS_URL: aide-milvus:19530   # 容器网络内直连 Milvus
+    ports:
+      - "9092:3000"                   # 访问 http://localhost:9092
+    depends_on:
+      milvus:
+        condition: service_healthy
+
 volumes:
   aide_pgdata:
   aide_etcd:
