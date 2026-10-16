@@ -6,7 +6,12 @@
 依赖 .env 中配置了可用的 LLM。输入 q 退出。
 """
 
+import sys
 import uuid
+from pathlib import Path
+
+# 让脚本直接运行时也能 import app 包（把项目根加入 sys.path）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.errors import NodeInterrupt
