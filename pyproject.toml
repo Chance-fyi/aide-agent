@@ -1,0 +1,49 @@
+[project]
+name = "aide-agent"
+version = "0.1.0"
+description = "客服 Agent：智能客服 + 知识库 RAG + 人工转接（FastAPI + LangGraph）"
+requires-python = ">=3.12"
+dependencies = [
+    # Web 框架
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    # LangGraph 生态
+    "langgraph>=0.4",
+    "langgraph-checkpoint-postgres>=2.0",
+    "langchain-core>=0.3",
+    "langchain-text-splitters>=0.3",
+    "langchain-openai>=0.3",
+    # 向量数据库（Milvus）与 pgvector
+    "langchain-milvus>=0.2",
+    "pymilvus>=2.5",
+    "psycopg[binary,pool]>=3.2",
+    # Embedding：本地 BGE（CPU 版 torch，见下方 index 配置）
+    "sentence-transformers>=3.4",
+    # 环境变量
+    "pydantic-settings>=2.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "httpx>=0.28",
+    "ruff>=0.9",
+]
+
+# 关键：torch 走 CPU 专用源，避免拉取几个 GB 的 CUDA 版本
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

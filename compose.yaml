@@ -1,0 +1,76 @@
+# 客服 Agent 中间件编排（podman）
+# 启动：podman compose up -d
+#
+# Milvus 编排说明：
+# 曾尝试单容器内嵌 etcd（ETCD_USE_EMBED=true），但内嵌 etcd 在 rootless podman
+# 下初始化时稳定 SIGSEGV（etcd 的 mmap/锁操作与 rootless 沙箱不兼容），
+# 故采用官方标准三容器编排：etcd + MinIO + Milvus，这是兼容性最有保障的方案。
+
+services:
+  # ---------- Postgres：会话记忆（LangGraph Checkpointer）+ 业务数据 ----------
+  postgres:
+    image: pgvector/pgvector:pg17        # 官方 pgvector 镜像，省去自己装扩展
+    container_name: aide-postgres
+    environment:
+      POSTGRES_USER: aide
+      POSTGRES_PASSWORD: aide_secret     # 开发环境固定值，与 .env.example 保持一致
+      POSTGRES_DB: aide_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - aide_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aide -d aide_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------- etcd：Milvus 元数据存储 ----------
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    container_name: aide-milvus-etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    command:
+      - etcd
+      - -advertise-client-urls=http://aide-milvus-etcd:2379
+      - -listen-client-urls=http://0.0.0.0:2379
+      - --data-dir=/etcd
+    volumes:
+      - aide_etcd:/etcd
+
+  # ---------- Milvus：向量数据库（知识库 RAG 检索） ----------
+  milvus:
+    image: milvusdb/milvus:v2.5.4
+    container_name: aide-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: aide-milvus-etcd:2379
+      # 本地文件存储：MinIO 社区镜像已全面下架（Docker Hub 移除 / quay 需 license），
+      # Milvus 2.4+ 官方支持 local storage 模式，开发环境无需对象存储
+      COMMON_STORAGETYPE: local
+    ports:
+      - "19530:19530"   # gRPC 端口，pymilvus 连这里
+      - "9091:9091"     # 健康检查 / metrics
+    volumes:
+      - aide_milvus:/var/lib/milvus
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    depends_on:
+      milvus-etcd:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  aide_pgdata:
+  aide_etcd:
+  aide_milvus:
