@@ -106,3 +106,23 @@ def test_unsupported_format_skipped(tmp_path):
     (tmp_path / "a.md").write_text("# T\n\n内容", encoding="utf-8")
     chunks = load_and_split_all(str(tmp_path))
     assert len(chunks) == 1
+
+def test_split_strategies_all_work():
+    """三种策略都能切块且口径正确：fixed 每块自为父块，header 保留标题元数据。"""
+    md = "# 政策\n\n## 退货\n\n七天无理由退货。超出 400 字的内容。" * 12
+
+    header = split_markdown(md, "t.md", strategy="header")
+    para = split_markdown(md, "t.md", strategy="paragraph")
+    fixed = split_markdown(md, "t.md", strategy="fixed")
+    assert all(len(x) >= 1 for x in (header, para, fixed))
+    # header：标题进元数据；fixed/paragraph：h1 退化为文件名
+    assert header[0].h2 == "退货"
+    assert fixed[0].h1 == "t.md" and fixed[0].parent_content == fixed[0].content
+    assert para[0].h1 == "t.md"
+
+def test_unknown_strategy_rejected():
+    """非法策略名应显式报错，而不是静默走默认。"""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="未知切分策略"):
+        split_markdown("# T\n\n内容", "t.md", strategy="magic")

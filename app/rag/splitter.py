@@ -19,6 +19,8 @@ from pathlib import Path
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
+from app.core.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 # 提取的标题层级：# 和 ## 足够表达客服文档结构，更深层级意义不大
@@ -72,8 +74,38 @@ def _chunks_from_section(content: str, source: str, h1: str, h2: str) -> list[Ch
         )
     return chunks
 
-def split_markdown(text: str, source: str) -> list[Chunk]:
-    """把一篇 Markdown 文档按标题切成父子结构块。"""
+def split_markdown(text: str, source: str, strategy: str | None = None) -> list[Chunk]:
+    """把一篇 Markdown 文档切成父子结构块。
+
+    strategy：
+    - header（默认）：按 #/## 标题切，保留标题元数据——结构化文档首选
+    - paragraph：无视标题，按空行分段聚合——适合结构混乱/伪标题文档
+    - fixed：不识别任何结构，固定窗口滑切——对照组，效果通常最差
+    None 时读全局配置 KB_SPLIT_STRATEGY（生产重建口径与对比工具共用）。
+    """
+    if strategy is None:
+        strategy = get_settings().kb_split_strategy
+    if strategy not in _STRATEGIES:
+        raise ValueError(f"未知切分策略: {strategy}，可选: {sorted(_STRATEGIES)}")
+
+    if strategy == "fixed":
+        # 不识别结构：固定窗口滑切，每块自为父块（对照基准）
+        return [
+            Chunk(
+                content=piece,
+                source=source,
+                h1=source,
+                h2="",
+                parent_content=piece,
+            )
+            for piece in _make_fallback().split_text(text.strip())
+            if piece.strip()
+        ]
+
+    if strategy == "paragraph":
+        return _split_plain_text(text, source)
+
+    # header 策略（默认）
     header_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=_HEADERS_TO_SPLIT_ON,
         strip_headers=False,  # 保留标题文字在正文里，向量化时标题是强语义信号
@@ -88,6 +120,10 @@ def split_markdown(text: str, source: str) -> list[Chunk]:
             continue
         chunks.extend(_chunks_from_section(content, source, meta.get("h1", ""), meta.get("h2", "")))
     return chunks
+
+# 可选切分策略（step-17）：策略选择难以凭直觉判断，
+# 提供对照工具用真实查询比效果，再定生产口径
+_STRATEGIES = {"header", "paragraph", "fixed"}
 
 def _split_plain_text(text: str, source: str) -> list[Chunk]:
     """无标题文档的通用切法：空行分段 → 相邻段落聚合为小节 → 父子切分。
@@ -148,11 +184,17 @@ _LOADERS = {
     ".pdf": _load_pdf,
 }
 
-def load_and_split_all(kb_dir: str) -> list[Chunk]:
-    """读取知识库目录下所有受支持格式的文件并切块。"""
+def load_and_split_all(kb_dir: str, strategy: str | None = None) -> list[Chunk]:
+    """读取知识库目录下所有受支持格式的文件并切块（strategy 语义同 split_markdown）。"""
+    if strategy is None:
+        strategy = get_settings().kb_split_strategy
+
     all_chunks: list[Chunk] = []
     for f in sorted(Path(kb_dir).iterdir()):
         if not f.is_file():
+            continue
+        if f.suffix.lower() == ".md":
+            all_chunks.extend(split_markdown(f.read_text(encoding="utf-8"), source=f.name, strategy=strategy))
             continue
         loader = _LOADERS.get(f.suffix.lower())
         if loader is None:

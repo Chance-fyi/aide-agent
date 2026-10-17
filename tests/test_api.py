@@ -170,3 +170,23 @@ async def test_chat_whitespace_message_422(client):
     """纯空白消息应 422（去空白后为空）。"""
     resp = await client.post("/chat", json={"message": "   "})
     assert resp.status_code == 422
+
+# ---------- step-17：切分策略对比工具 ----------
+
+async def test_split_compare_stats_only(client):
+    """不带 q：只返回各策略的切块统计（不触发 embedding，秒回）。"""
+    resp = await client.get("/debug/kb/split_compare")
+    assert resp.status_code == 200
+    body = resp.json()
+    names = [s["strategy"] for s in body["strategies"]]
+    assert names == ["header", "paragraph", "fixed"]
+    for entry in body["strategies"]:
+        assert entry["chunk_count"] > 0
+        assert entry["avg_len"] > 0
+        assert "top_k" not in entry
+
+async def test_split_compare_unknown_strategy_422(client):
+    """非法策略名应 422 并提示可选值。"""
+    resp = await client.get("/debug/kb/split_compare", params={"strategies": "magic"})
+    assert resp.status_code == 422
+    assert "未知切分策略" in resp.json()["detail"]

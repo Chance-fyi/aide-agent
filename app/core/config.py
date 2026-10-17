@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     kb_schema_version: int = 2
     # embedding 向量维度：换 embedding 模型时必须同步改（bge-small-zh=512，bge-base-zh=768）
     embedding_dim: int = 512
+    # 知识库切分策略：header（按标题）/ paragraph（按段落聚合）/ fixed（固定窗口）。
+    # 切换策略需同步 bump KB_SCHEMA_VERSION 后重建，否则新旧块口径不一致
+    kb_split_strategy: str = "header"
     # 蓝绿重建的冒烟测试查询（逗号分隔）：新数据必须能命中这些核心业务问题才准上线
     rebuild_smoke_queries: str = "退货,退款,发货"
 
