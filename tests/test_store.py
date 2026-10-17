@@ -45,6 +45,16 @@ def test_search_result_schema():
     assert hit["content"]
 
 
+def test_search_min_score_filters_irrelevant():
+    """阈值过滤：提高 min_score 应滤掉低分命中；置 0 则不过滤。"""
+    # 正常阈值下退货查询应有命中
+    hits = store.search("怎么退货", top_k=3)
+    assert hits, "退货查询在默认阈值下不应为空"
+    # 阈值拉到 0.99：任何真实相似度都达不到，应返回空列表而不是报错
+    assert store.search("怎么退货", top_k=3, min_score=0.99) == []
+    # 显式置 0：不过滤，条数应不少于默认阈值的结果
+    assert len(store.search("怎么退货", top_k=3, min_score=0)) >= len(hits)
+
 def test_search_empty_collection_raises():
     """集合不存在时显式报错（区分"没建库"与"没检索到"）。"""
     from pymilvus import MilvusClient

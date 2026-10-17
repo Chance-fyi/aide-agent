@@ -116,13 +116,22 @@ def rebuild_index(kb_dir: str) -> int:
     return len(rows)
 
 
-def search(query: str, top_k: int | None = None, collection_name: str = COLLECTION_NAME) -> list[dict]:
+def search(
+    query: str,
+    top_k: int | None = None,
+    collection_name: str = COLLECTION_NAME,
+    min_score: float | None = None,
+) -> list[dict]:
     """语义检索：返回 top_k 个相关块（含相似度分数与元数据）。
 
     collection_name 参数化：便于测试注入不存在的集合名（异常路径测试）。
+    min_score：相似度阈值过滤。None 时读全局配置——低于阈值的命中视为"不相关"，
+    直接丢弃而不是塞给 LLM。这是缓解幻觉的第一道闸：宁可"没检到"，不可"检错了"。
     """
     s = get_settings()
     top_k = top_k or s.retrieval_top_k
+    # 显式传 0 表示不过滤（调试场景想看全量分数分布）
+    threshold = s.retrieval_min_score if min_score is None else min_score
 
     client = _get_client()
     if not client.has_collection(collection_name):
@@ -140,7 +149,7 @@ def search(query: str, top_k: int | None = None, collection_name: str = COLLECTI
     )
 
     hits = results[0]  # 只有一个查询，取第一个结果集
-    return [
+    out = [
         {
             "score": float(hit["distance"]),
             "content": hit["entity"]["content"],
@@ -150,3 +159,5 @@ def search(query: str, top_k: int | None = None, collection_name: str = COLLECTI
         }
         for hit in hits
     ]
+    # 低分过滤：放在返回前统一做，调用方无需各自判断
+    return [h for h in out if h["score"] >= threshold]

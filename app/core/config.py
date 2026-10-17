@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # ----- 业务参数 -----
     history_max_rounds: int = 10
     retrieval_top_k: int = 3
+    # 检索相似度阈值：低于此分数的命中视为"不相关"直接丢弃。
+    # BGE-small-zh 余弦相似度：语义相关通常 >0.5，无关内容多在 0.2~0.3。
+    # 低分片段喂给 LLM 是幻觉的主要诱因，宁可少检不可错检
+    retrieval_min_score: float = 0.4
     # 强制转人工关键词：LLM 判断之外的第二道保险（步骤 7 使用）
     transfer_keywords: str = "转人工,人工客服,投诉"
 
