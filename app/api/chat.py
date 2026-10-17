@@ -74,6 +74,9 @@ async def history(thread_id: str) -> SessionHistoryResponse:
         )
         for m in state.values["messages"]
         if isinstance(m, (HumanMessage, AIMessage))
+        # 过滤掉 tool_calls 中间消息（content 为空的 AIMessage）：
+        # 它是 Agent 内部的"工具调用记录"，不是要展示给用户的对话内容
+        and not (isinstance(m, AIMessage) and not m.text().strip())
     ]
 
     return SessionHistoryResponse(
