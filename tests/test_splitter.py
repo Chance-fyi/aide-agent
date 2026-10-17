@@ -46,3 +46,63 @@ def test_real_kb_loads():
     assert all(c.source.endswith(".md") for c in chunks)
     # 长度约束：所有块都不超过兜底上限（400 字正文 + overlap 余量）
     assert all(len(c.content) <= 460 for c in chunks)
+
+# ---------- step-16：父子结构 + 多格式 ----------
+
+def test_parent_is_full_section():
+    """子块的 parent_content 应是完整小节：父块可含子块之外的上下文。"""
+    md = "# 退货政策\n\n## 退货条件\n\n7天内可退货。\n\n定制类商品除外，需保留包装。"
+    chunks = split_markdown(md, source="test.md")
+    assert len(chunks) == 1
+    c = chunks[0]
+    assert c.parent_content == c.content  # 单块小节，父块即全文
+
+def test_parent_dedup_when_long_section_split():
+    """超长小节二次切后，所有子块共享同一父块（完整小节）。"""
+    body = "这是政策细则的内容。" * 30  # 300 字，不超过父块上限但超过子块上限？
+    # 用更长的：600 字 → 超过子块上限 400，二次切；小于父块上限 1500
+    body = "这是政策细则的内容。" * 60
+    md = f"# 政策\n\n## 细则\n\n{body}"
+    chunks = split_markdown(md, source="test.md")
+    assert len(chunks) >= 2
+    parents = {c.parent_content for c in chunks}
+    assert len(parents) == 1, "同一小节的子块应共享同一父块"
+    parent = parents.pop()
+    assert len(parent) > len(chunks[0].content), "父块应比子块更长（含完整上下文）"
+
+def test_overlong_section_self_parent():
+    """超过父块上限（1500字）的小节：子块自为父块，避免父块过长稀释注意力。"""
+    body = "很长的细则内容。" * 400  # 2800 字
+    md = f"# 政策\n\n## 细则\n\n{body}"
+    chunks = split_markdown(md, source="test.md")
+    assert all(c.parent_content == c.content for c in chunks)
+
+def test_txt_loader(tmp_path):
+    """txt：空行分段聚合为小节，元数据 h1=文件名。"""
+    f = tmp_path / "notice.txt"
+    f.write_text("第一段：发货时效说明，48小时内发货。\n\n第二段：偏远地区顺延一至两天。\n\n第三段：节假日顺延。", encoding="utf-8")
+    chunks = load_and_split_all(str(tmp_path))
+    assert len(chunks) >= 1
+    assert all(c.h1 == "notice.txt" for c in chunks)
+    assert "48小时" in "".join(c.content for c in chunks)
+
+def test_docx_loader(tmp_path):
+    """docx：提取段落正文，与 txt 同流程。"""
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("会员积分在订单签收后 7 天自动到账。")
+    doc.add_paragraph("积分可用于抵扣现金，100 积分抵 1 元。")
+    f = tmp_path / "membership.docx"
+    doc.save(str(f))
+
+    chunks = load_and_split_all(str(tmp_path))
+    assert len(chunks) >= 1
+    assert "积分" in "".join(c.content for c in chunks)
+
+def test_unsupported_format_skipped(tmp_path):
+    """目录里的无关文件（图片等）应被跳过，不炸掉入库流程。"""
+    (tmp_path / "logo.png").write_bytes(b"fake")
+    (tmp_path / "a.md").write_text("# T\n\n内容", encoding="utf-8")
+    chunks = load_and_split_all(str(tmp_path))
+    assert len(chunks) == 1

@@ -73,6 +73,8 @@ def ensure_collection(client: MilvusClient, name: str) -> None:
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=s.embedding_dim),
             # 正文：检索命中后要返回给 LLM/前端
             FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=2048),
+            # 父块：子块所属小节全文（父子检索的返回单元，超长小节时与 content 相同）
+            FieldSchema(name="parent_content", dtype=DataType.VARCHAR, max_length=2048),
             # 元数据：溯源与展示用。VARCHAR 必须声明 max_length
             FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="h1", dtype=DataType.VARCHAR, max_length=128),
@@ -165,6 +167,7 @@ def rebuild_index(kb_dir: str) -> int:
         {
             "embedding": vec,
             "content": c.content,
+            "parent_content": c.parent_content[:2000],  # schema 上限 2048，防御性截断
             "source": c.source,
             "h1": c.h1,
             "h2": c.h2,
@@ -240,7 +243,7 @@ def search(
         collection_name=resolved,
         data=[embed_query(query)],
         limit=top_k,
-        output_fields=["content", "source", "h1", "h2"],
+        output_fields=["content", "parent_content", "source", "h1", "h2"],
         # 归一化向量 + IP 度量下，score 就是余弦相似度
         search_params={"metric_type": "IP"},
     )
@@ -250,6 +253,7 @@ def search(
         {
             "score": float(hit["distance"]),
             "content": hit["entity"]["content"],
+            "parent_content": hit["entity"]["parent_content"],
             "source": hit["entity"]["source"],
             "h1": hit["entity"]["h1"],
             "h2": hit["entity"]["h2"],

@@ -11,20 +11,26 @@ from app.rag import store
 
 @pytest.fixture(scope="module", autouse=True)
 def require_collection():
-    """前置：线上别名必须存在（没入库的检索测试没有意义，直接失败提示）。
+    """前置：线上别名必须可用且 schema 为最新。
 
-    检索走别名（store.alias_name()），指向当前线上版本集合。
+    - 别名不存在：没入库，直接失败提示
+    - 集合缺 parent_content 字段（v1 旧 schema）：自动触发蓝绿重建升级，
+      旧数据无法平滑加字段，重建是唯一正道（step-15 的别名机制保证不丟线上可用性）
     """
     from pymilvus import MilvusClient
 
     from app.core.config import get_settings
 
     client = MilvusClient(uri=get_settings().milvus_uri)
-    if store._resolve_collection(client, store.alias_name()) is None:
+    resolved = store._resolve_collection(client, store.alias_name())
+    if resolved is None:
         pytest.fail(
             "知识库别名未指向任何集合，请先入库："
             "store.rebuild_index('data/knowledge_base') 或 POST /debug/kb/rebuild"
         )
+    fields = {f["name"] for f in client.describe_collection(resolved)["fields"]}
+    if "parent_content" not in fields:
+        store.rebuild_index("data/knowledge_base")
 
 
 def test_search_returns_relevant_result():
@@ -44,11 +50,19 @@ def test_search_scores_are_sorted():
 
 
 def test_search_result_schema():
-    """检索结果包含完整字段（content/source/h1/h2/score）。"""
+    """检索结果包含完整字段（content/parent_content/source/h1/h2/score）。"""
     hit = store.search("会员积分", top_k=1)[0]
-    assert set(hit.keys()) == {"score", "content", "source", "h1", "h2"}
+    assert set(hit.keys()) == {"score", "content", "parent_content", "source", "h1", "h2"}
     assert isinstance(hit["score"], float)
     assert hit["content"]
+    assert hit["parent_content"], "父子检索：父块不应为空"
+
+def test_parent_child_retrieval_returns_context():
+    """父子检索：父块应包含子块之外的小节上下文（或自为父块）。"""
+    hit = store.search("退货条件", top_k=1)[0]
+    # 父块至少不短于子块：短小节父块=全文，超长小节自为父块
+    assert len(hit["parent_content"]) >= len(hit["content"])
+    assert hit["content"] in hit["parent_content"] or hit["parent_content"] == hit["content"]
 
 
 def test_search_min_score_filters_irrelevant():

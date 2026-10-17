@@ -74,11 +74,20 @@ def search_kb(query: str) -> str:
             "如用户仍需解决该问题，请调用 transfer_to_human 转接人工客服。"
         )
 
-    # 把多个片段拼成一篇文章返回给 LLM，附带来源方便引用
-    parts = [
-        f"【{h['source']} | {h['h1']}/{h['h2']} | 相关度 {h['score']:.2f}】\n{h['content']}"
-        for h in hits
-    ]
+    # 父子检索（small-to-big）：用短子块检索保证"找得准"，
+    # 用长父块喂 LLM 保证"答得全"。多个子块命中同一小节时去重，
+    # 避免同一政策的不同片段重复占用上下文
+    seen_parents: set[tuple] = set()
+    parts: list[str] = []
+    for h in hits:
+        parent = h.get("parent_content") or h["content"]  # 兼容旧版本无父块数据
+        key = (h["source"], h["h1"], h["h2"], parent[:64])
+        if key in seen_parents:
+            continue
+        seen_parents.add(key)
+        parts.append(
+            f"【{h['source']} | {h['h1']}/{h['h2']} | 相关度 {h['score']:.2f}】\n{parent}"
+        )
     return "\n\n---\n\n".join(parts)
 
 
