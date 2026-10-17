@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # 调试接口开关：生产环境置 false，调试路由不注册
     debug: bool = True
 
+    # 输入防护开关：注入检测 + 违禁词（guardrails.py）。
+    # 关闭后完全跳过规则检查——仅供本地调试，生产必须开启
+    input_guardrail: bool = True
+    # 违禁词追加表（逗号分隔），与内置默认表叠加，业务无需改代码即可增删
+    blocked_words: str = ""
+
     @property
     def postgres_dsn(self) -> str:
         """LangGraph Checkpointer 需要的连接串格式。"""

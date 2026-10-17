@@ -15,6 +15,8 @@ from app.api.schemas import (
     SessionHistoryResponse,
     SessionMessage,
 )
+from app.core import guardrails
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,19 @@ async def chat(req: ChatRequest) -> ChatResponse:
     """
     thread_id = req.thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
+
+    # 输入安检（API 层短路）：命中注入/违禁词直接友好拒答，
+    # 不进 graph——省一次 LLM 调用，也不往 Checkpointer 写污染状态。
+    # 拦截后记日志留痕（安全事件必须可追溯）
+    if get_settings().input_guardrail:
+        category = guardrails.check_message(req.message)
+        if category:
+            guardrails.log_rejection(thread_id, category, req.message)
+            return ChatResponse(
+                message=guardrails.refusal_reply(category),
+                thread_id=thread_id,
+                transferred=False,
+            )
 
     try:
         graph = await get_graph()

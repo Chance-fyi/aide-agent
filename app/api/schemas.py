@@ -1,6 +1,6 @@
 """Chat 请求/响应模型与业务异常定义。"""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChatRequest(BaseModel):
@@ -12,6 +12,15 @@ class ChatRequest(BaseModel):
 
     message: str = Field(..., min_length=1, max_length=2000, description="用户消息")
     thread_id: str | None = Field(default=None, description="会话 ID，首轮不传")
+
+    @field_validator("message")
+    @classmethod
+    def strip_message(cls, v: str) -> str:
+        """去首尾空白后拒绝纯空白消息：纯空格也能通过 min_length，会白白消耗一次 LLM 调用。"""
+        v = v.strip()
+        if not v:
+            raise ValueError("消息不能为空白")
+        return v
 
 
 class ChatResponse(BaseModel):
