@@ -9,10 +9,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import router
+from app.agents import runtime
 from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
-from app.agents import runtime
+from app.api.routes import router
 
 
 @asynccontextmanager

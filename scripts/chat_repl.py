@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langgraph.checkpoint.postgres import PostgresSaver
-from langgraph.errors import NodeInterrupt
 
 from app.agents.graph import build_graph_with_memory
 from app.core.config import get_settings

@@ -19,7 +19,6 @@ from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
 
 from app.core.config import get_settings
 from app.rag.embedder import embed_query, embed_texts
-from app.rag.splitter import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -117,19 +116,22 @@ def rebuild_index(kb_dir: str) -> int:
     return len(rows)
 
 
-def search(query: str, top_k: int | None = None) -> list[dict]:
-    """语义检索：返回 top_k 个相关块（含相似度分数与元数据）。"""
+def search(query: str, top_k: int | None = None, collection_name: str = COLLECTION_NAME) -> list[dict]:
+    """语义检索：返回 top_k 个相关块（含相似度分数与元数据）。
+
+    collection_name 参数化：便于测试注入不存在的集合名（异常路径测试）。
+    """
     s = get_settings()
     top_k = top_k or s.retrieval_top_k
 
     client = _get_client()
-    if not client.has_collection(COLLECTION_NAME):
+    if not client.has_collection(collection_name):
         # 集合不存在说明知识库还没入库——显式报错而不是静默返回空，
         # 让调用方能区分"没建库"和"没检索到"
         raise RuntimeError("知识库集合不存在，请先执行入库（rebuild_index）")
 
     results = client.search(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         data=[embed_query(query)],
         limit=top_k,
         output_fields=["content", "source", "h1", "h2"],

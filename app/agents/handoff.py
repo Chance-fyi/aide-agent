@@ -13,7 +13,6 @@ MVP 用同步 psycopg：转接是低频操作，简单可靠优先。
 """
 
 import logging
-from datetime import datetime
 
 import psycopg
 

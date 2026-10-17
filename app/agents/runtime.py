@@ -58,7 +58,8 @@ async def close() -> None:
     if _pool is not None:
         try:
             await _pool.close()
-        except Exception:  # noqa: BLE001 关闭失败不应阻断进程退出
-            pass
+        except Exception:
+            # 关闭失败只记日志，不阻断进程退出
+            logger.warning("连接池关闭异常", exc_info=True)
     _pool = None
     _graph = None

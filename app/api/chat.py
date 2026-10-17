@@ -4,6 +4,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agents import handoff
 from app.agents.runtime import get_graph
@@ -13,8 +14,6 @@ from app.api.schemas import (
     SessionHistoryResponse,
     SessionMessage,
 )
-from langgraph.checkpoint.postgres import PostgresSaver
-from langchain_core.messages import AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
