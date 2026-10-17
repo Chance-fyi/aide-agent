@@ -9,7 +9,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes import router
+from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
+from app.agents import runtime
 
 
 @asynccontextmanager
@@ -26,7 +28,8 @@ async def lifespan(app: FastAPI):
     print(f"[startup] LLM: model={s.llm_model} base_url={s.llm_base_url}")
     print(f"[startup] Milvus: {s.milvus_uri} | Postgres: {s.postgres_host}:{s.postgres_port}")
     yield
-    # 关闭阶段的清理动作（Checkpointer 连接池等）在步骤 6 接入后补充
+    # 关闭：释放 Agent 的 Checkpointer 连接池
+    runtime.close()
 
 
 app = FastAPI(
@@ -37,4 +40,5 @@ app = FastAPI(
 )
 
 app.include_router(router)
+app.include_router(chat_router)
 register_debug_routes(app)  # 调试路由：debug=False 时不注册

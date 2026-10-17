@@ -24,7 +24,7 @@ from typing import Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -171,7 +171,7 @@ def transfer_node(state: AgentState):
 # 组装图
 # ============================================================
 
-def build_graph_with_memory(checkpointer: PostgresSaver):
+def build_graph_with_memory(checkpointer: AsyncPostgresSaver):
     """构建带 Postgres Checkpointer 的图（生产入口）。
 
     checkpointer 的作用：每次图执行后把完整状态（含全部消息）存入 Postgres，
