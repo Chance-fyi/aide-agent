@@ -4,6 +4,7 @@
 业务逻辑全部在 api/agents/rag 模块里——保持入口薄，方便测试。
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -13,6 +14,14 @@ from app.agents import runtime
 from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
 from app.api.routes import router
+
+# 日志基础配置：生产部署时由 gunicorn/uvicorn 参数或环境变量接管更细粒度的配置，
+# 这里保证"无论谁启动进程，异常都能以统一格式落到 stderr"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -26,8 +35,8 @@ async def lifespan(app: FastAPI):
     from app.core.config import get_settings
 
     s = get_settings()
-    print(f"[startup] LLM: model={s.llm_model} base_url={s.llm_base_url}")
-    print(f"[startup] Milvus: {s.milvus_uri} | Postgres: {s.postgres_host}:{s.postgres_port}")
+    logger.info("LLM: model=%s base_url=%s", s.llm_model, s.llm_base_url)
+    logger.info("Milvus: %s | Postgres: %s:%s", s.milvus_uri, s.postgres_host, s.postgres_port)
     yield
     # 关闭：释放 Agent 的 Checkpointer 连接池
     runtime.close()

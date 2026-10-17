@@ -49,6 +49,12 @@ target-version = "py312"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+# 会话级事件循环：与生产"单事件循环"一致。
+# runtime 的 asyncio.Lock / AsyncConnectionPool 绑定在首次使用的事件循环上，
+# 默认的"每测试一个循环"会让后续测试撞上 bound to a different event loop
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+
 # fastapi 命令行（uv run fastapi dev）的入口配置，免每次手敲 app.main:app
 [tool.fastapi]
 entrypoint = "app.main:app"

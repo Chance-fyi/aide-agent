@@ -10,9 +10,12 @@ agent 路径需要真实 LLM，不进 CI 冒烟（后面评估集迭代覆盖）
 
 import uuid
 
+import httpx
+import openai
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.api import chat as chat_mod
 from app.main import app
 
 
@@ -74,3 +77,51 @@ async def test_history_404(client):
     """不存在会话应 404。"""
     resp = await client.get(f"/chat/{uuid.uuid4()}/history")
     assert resp.status_code == 404
+
+# ---------- step-12：LLM 异常分级与友好错误 ----------
+
+def _timeout_error() -> openai.APITimeoutError:
+    """构造真实的 openai 超时异常（校验异常映射的继承顺序是否正确）。"""
+    return openai.APITimeoutError(request=httpx.Request("POST", "http://test"))
+
+async def test_chat_llm_timeout_friendly_error(client, monkeypatch):
+    """LLM 超时应转为 503 + 可操作文案，而不是裸 500 或泄露内部细节。"""
+    async def boom():
+        raise _timeout_error()
+
+    monkeypatch.setattr(chat_mod, "get_graph", boom)
+    resp = await client.post("/chat", json={"message": "你好"})
+    assert resp.status_code == 503
+    assert "超时" in resp.json()["detail"]
+
+async def test_chat_llm_rate_limit_friendly_error(client, monkeypatch):
+    """限流错误应给出"人数较多"文案（与普通故障区分，引导稍后再试）。"""
+    request = httpx.Request("POST", "http://test")
+
+    async def boom():
+        raise openai.RateLimitError(
+            "rate limited", response=httpx.Response(429, request=request), body=None
+        )
+
+    monkeypatch.setattr(chat_mod, "get_graph", boom)
+    resp = await client.post("/chat", json={"message": "你好"})
+    assert resp.status_code == 503
+    assert "人数较多" in resp.json()["detail"]
+
+async def test_chat_status_query_failure_degrades(client, monkeypatch):
+    """转接状态查询失败时不应拖垮已生成的回复：降级为未转接 + 200。"""
+    def boom(thread_id):
+        raise RuntimeError("postgres down")
+
+    # 走关键词转接链路（不依赖真实 LLM），再让状态查询炸掉
+    monkeypatch.setattr(chat_mod.handoff, "get_status", boom)
+    resp = await client.post("/chat", json={"message": "转人工"})
+    assert resp.status_code == 200
+    assert resp.json()["transferred"] is False
+
+async def test_history_invalid_thread_id_rejected(client):
+    """非法字符/超长 thread_id 应 422（纵深防御，不进 Checkpointer）。"""
+    resp = await client.get("/chat/not%20allowed%20id/history")
+    assert resp.status_code == 422
+    resp = await client.get(f"/chat/{'a' * 65}/history")
+    assert resp.status_code == 422

@@ -142,8 +142,15 @@ def route_input(state: AgentState, config: RunnableConfig) -> str:
     """
     thread_id = config["configurable"]["thread_id"]
 
-    # 守卫：待人工会话不再进 agent
-    if handoff.get_status(thread_id) == handoff.STATUS_PENDING_HUMAN:
+    # 守卫：待人工会话不再进 agent。
+    # 状态查询失败不能拖垮对话（Postgres 抖动时用户还能继续自助问答），
+    # 降级为 active——代价是极端情况下已转接会话多问一轮，可接受
+    try:
+        status = handoff.get_status(thread_id)
+    except Exception:
+        logger.exception("转接状态查询失败，按 active 处理 thread=%s", thread_id)
+        status = handoff.STATUS_ACTIVE
+    if status == handoff.STATUS_PENDING_HUMAN:
         return "transfer"
 
     # 关键词兜底：只检查本轮最新一条用户消息
