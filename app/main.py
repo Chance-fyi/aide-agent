@@ -7,6 +7,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.api.chat import router as chat_router
@@ -42,3 +43,15 @@ app = FastAPI(
 app.include_router(router)
 app.include_router(chat_router)
 register_debug_routes(app)  # 调试路由：debug=False 时不注册
+
+# CORS：前端(5173)与后端(8000)端口不同源，浏览器会拦截跨域 fetch。
+# 开发环境放行本地前端端口；生产应改为具体域名列表（通过环境变量注入）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
