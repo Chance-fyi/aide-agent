@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     retrieval_min_score: float = 0.4
     # 强制转人工关键词：LLM 判断之外的第二道保险（步骤 7 使用）
     transfer_keywords: str = "转人工,人工客服,投诉"
+    # 人工排队超时（分钟）：超过后排队会话自动回退 active，用户可继续自助问答。
+    # 太久没人接的排队态若一直卡住，用户只能反复看"坐席接入中"死话术
+    transfer_queue_timeout_min: float = 30
+    # 排队超时巡检周期（秒）：多 worker 重复执行无害（幂等 UPDATE）
+    queue_sweep_interval_sec: int = 60
 
     # 调试接口开关：生产环境置 false，调试路由不注册
     debug: bool = True

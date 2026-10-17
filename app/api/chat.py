@@ -104,7 +104,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(
         message=text,
         thread_id=thread_id,
-        transferred=status == handoff.STATUS_PENDING_HUMAN,
+        # 排队中/坐席服务中都算"已转接"，前端据此展示对应状态 UI
+        transferred=handoff.is_live_status(status),
     )
 
 @router.get("/chat/{thread_id}/history", response_model=SessionHistoryResponse)

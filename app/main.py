@@ -4,6 +4,7 @@
 业务逻辑全部在 api/agents/rag 模块里——保持入口薄，方便测试。
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -13,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.agents import runtime
 from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
-from app.api.routes import router
+from app.api.routes import agent_router, router
 
 # 日志基础配置：生产部署时由 gunicorn/uvicorn 参数或环境变量接管更细粒度的配置，
 # 这里保证"无论谁启动进程，异常都能以统一格式落到 stderr"
@@ -22,6 +23,27 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+async def _queue_sweeper():
+    """排队超时回退的周期任务。
+
+    为什么不用 DB 定时器/独立进程：MVP 保持"单进程自足"，
+    多 worker 部署时每个进程都跑这个任务是幂等 UPDATE，重复执行无害。
+    同步 psycopg 放 to_thread 执行，避免阻塞事件循环。
+    """
+    from app.agents import handoff
+    from app.core.config import get_settings
+
+    while True:
+        try:
+            await asyncio.to_thread(handoff.sweep_timed_out)
+        except asyncio.CancelledError:
+            raise  # 关闭信号必须继续向上传播
+        except Exception:
+            # DB 抖动不能杀死巡检循环：记日志，下个周期重试
+            logger.exception("排队超时回退任务失败，下个周期重试")
+        await asyncio.sleep(get_settings().queue_sweep_interval_sec)
 
 
 @asynccontextmanager
@@ -37,8 +59,15 @@ async def lifespan(app: FastAPI):
     s = get_settings()
     logger.info("LLM: model=%s base_url=%s", s.llm_model, s.llm_base_url)
     logger.info("Milvus: %s | Postgres: %s:%s", s.milvus_uri, s.postgres_host, s.postgres_port)
+    # 后台巡检：排队超时的会话自动回退 active（间隔可配）
+    sweeper = asyncio.create_task(_queue_sweeper())
     yield
-    # 关闭：释放 Agent 的 Checkpointer 连接池
+    # 关闭：先停巡检任务，再释放 Agent 的 Checkpointer 连接池
+    sweeper.cancel()
+    try:
+        await sweeper
+    except asyncio.CancelledError:
+        pass
     runtime.close()
 
 
@@ -50,6 +79,7 @@ app = FastAPI(
 )
 
 app.include_router(router)
+app.include_router(agent_router)
 app.include_router(chat_router)
 register_debug_routes(app)  # 调试路由：debug=False 时不注册
 

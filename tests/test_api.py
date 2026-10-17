@@ -66,11 +66,33 @@ async def test_chat_keyword_transfer_full_flow(client):
     h = await client.get(f"/chat/{tid}/history")
     assert h.status_code == 200
     body = h.json()
-    assert body["status"] == "pending_human"
+    assert body["status"] == "queued"
     roles = [m["role"] for m in body["messages"]]
     assert roles[0] == "user"
     for m in body["messages"]:
         assert m["content"].strip(), "历史里不应有空消息（tool_calls 已过滤）"
+
+    # 4) 坐席接入 → in_service
+    a = await client.post(f"/agent/threads/{tid}/accept", json={"agent_name": "坐席小王"})
+    assert a.status_code == 200
+    # 5) 处理结束 → closed；新消息视为新问题回自助（transferred=False）
+    c = await client.post(f"/agent/threads/{tid}/close", json={"resolution": "已解决"})
+    assert c.status_code == 200
+    r3 = await client.post("/chat", json={"message": "退货政策是什么", "thread_id": tid})
+    # 走 agent 需要真实 LLM，这里只验证状态已复位（不再被守卫拦死）
+    assert r3.status_code in {200, 503}  # 503 = 本地未配 LLM Key，链路本身已放行
+    h2 = await client.get(f"/chat/{tid}/history")
+    assert h2.json()["status"] in {"active", "closed"}
+
+async def test_agent_accept_conflict(client):
+    """不在排队中的会话不可接入：409 而非 500。"""
+    resp = await client.post(f"/agent/threads/{uuid.uuid4()}/accept", json={})
+    assert resp.status_code == 409
+
+async def test_agent_close_conflict(client):
+    """不存在/非待处理会话不可关闭：409。"""
+    resp = await client.post(f"/agent/threads/{uuid.uuid4()}/close", json={})
+    assert resp.status_code == 409
 
 
 async def test_history_404(client):

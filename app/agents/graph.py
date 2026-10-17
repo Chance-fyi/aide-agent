@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 # 待人工状态下的统一话术（坐席端上线前的过渡回复）
 _PENDING_HUMAN_REPLY = "您的工单已提交，人工客服正在接入，请稍候。客服会尽快与您联系。"
+# 大段统回复：坐席正在服务中的话术（与"排队中"区分，让用户知道进展）
+_IN_SERVICE_REPLY = "人工客服正在为您服务，请直接描述您的问题。"
 
 
 # ============================================================
@@ -142,7 +144,7 @@ def route_input(state: AgentState, config: RunnableConfig) -> str:
     """
     thread_id = config["configurable"]["thread_id"]
 
-    # 守卫：待人工会话不再进 agent。
+    # 守卫：受转接影响的会话不再进 agent（排队中/坐席服务中/旧版 pending_human）。
     # 状态查询失败不能拖垮对话（Postgres 抖动时用户还能继续自助问答），
     # 降级为 active——代价是极端情况下已转接会话多问一轮，可接受
     try:
@@ -150,8 +152,16 @@ def route_input(state: AgentState, config: RunnableConfig) -> str:
     except Exception:
         logger.exception("转接状态查询失败，按 active 处理 thread=%s", thread_id)
         status = handoff.STATUS_ACTIVE
-    if status == handoff.STATUS_PENDING_HUMAN:
+    if handoff.is_live_status(status):
         return "transfer"
+
+    if status == handoff.STATUS_CLOSED:
+        # closed 会话来了新消息：视为新问题回自助，同时复位状态行。
+        # 复位失败不影响本轮（closed 不在守卫集合里，agent 照常执行）
+        try:
+            handoff.reset_active(thread_id)
+        except Exception:
+            logger.exception("复位 closed 会话失败 thread=%s", thread_id)
 
     # 关键词兜底：只检查本轮最新一条用户消息
     last_user = next(
@@ -189,13 +199,22 @@ def _make_agent_node():
     return agent_node
 
 
-def transfer_node(state: AgentState):
-    """转接节点：生成统一的转接告知消息。
+def transfer_node(state: AgentState, config: RunnableConfig):
+    """转接节点：按当前状态生成对应话术。
 
-    状态落库已在 route_input / transfer_to_human 工具里完成，
-    这里只负责给用户一句明确的话术。
+    排队中与坐席服务中给用户不同反馈，避免"一直等待"的困惑。
+    注意：这里不推进状态——in_service 只能由坐席接入动作产生
+    （handoff.agent_accept），否则"排队"就名存实亡了。
     """
-    return {"messages": [AIMessage(content=_PENDING_HUMAN_REPLY)]}
+    thread_id = config["configurable"]["thread_id"]
+    try:
+        status = handoff.get_status(thread_id)
+    except Exception:
+        # 状态不可知时按排队处理，话术偏保守
+        logger.exception("transfer_node 状态查询失败 thread=%s", thread_id)
+        status = handoff.STATUS_QUEUED
+    reply = _IN_SERVICE_REPLY if status == handoff.STATUS_IN_SERVICE else _PENDING_HUMAN_REPLY
+    return {"messages": [AIMessage(content=reply)]}
 
 
 # ============================================================

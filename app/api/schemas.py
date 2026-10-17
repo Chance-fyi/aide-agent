@@ -37,5 +37,11 @@ class SessionMessage(BaseModel):
 
 class SessionHistoryResponse(BaseModel):
     thread_id: str
-    status: str                 # active / pending_human
+    status: str                 # active / queued / in_service / closed
     messages: list[SessionMessage]
+
+class AgentActionRequest(BaseModel):
+    """坐席操作请求：接入排队会话 / 结束人工处理。"""
+
+    agent_name: str = Field(default="agent", max_length=64, description="坐席标识")
+    resolution: str = Field(default="", max_length=500, description="处理结果（close 时使用）")
