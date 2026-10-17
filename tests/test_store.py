@@ -11,14 +11,20 @@ from app.rag import store
 
 @pytest.fixture(scope="module", autouse=True)
 def require_collection():
-    """前置：集合必须存在（没入库的检索测试没有意义，直接失败提示）。"""
+    """前置：线上别名必须存在（没入库的检索测试没有意义，直接失败提示）。
+
+    检索走别名（store.alias_name()），指向当前线上版本集合。
+    """
     from pymilvus import MilvusClient
 
     from app.core.config import get_settings
 
     client = MilvusClient(uri=get_settings().milvus_uri)
-    if not client.has_collection(store.COLLECTION_NAME):
-        pytest.fail("kb_chunks 集合不存在，请先入库：store.rebuild_index('data/knowledge_base')")
+    if store._resolve_collection(client, store.alias_name()) is None:
+        pytest.fail(
+            "知识库别名未指向任何集合，请先入库："
+            "store.rebuild_index('data/knowledge_base') 或 POST /debug/kb/rebuild"
+        )
 
 
 def test_search_returns_relevant_result():
@@ -66,3 +72,72 @@ def test_search_empty_collection_raises():
         client.drop_collection("nonexistent_test_col")
     with pytest.raises(RuntimeError, match="集合不存在"):
         store.search("test", top_k=1, collection_name="nonexistent_test_col")
+
+# ---------- step-15：版本化集合与蓝绿重建 ----------
+
+def _clear_settings_cache():
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+def test_target_name_stable_and_model_sensitive(monkeypatch):
+    """版本集合名：同配置稳定；换 embedding 模型必须得到不同集合（向量空间隔离）。"""
+    name1 = store._target_collection_name()
+    assert name1 == store._target_collection_name()  # 纯函数，同配置必稳定
+
+    monkeypatch.setenv("EMBEDDING_MODEL", "BAAI/bge-base-zh-v1.5")
+    monkeypatch.setenv("EMBEDDING_DIM", "768")
+    _clear_settings_cache()
+    try:
+        name2 = store._target_collection_name()
+        assert name2 != name1, "换模型必须指向新集合，否则新旧向量混在一个空间"
+    finally:
+        monkeypatch.undo()
+        _clear_settings_cache()
+
+def test_rebuild_switches_alias_and_cleans_old():
+    """蓝绿重建：别名应指向新版本集合，历史版本被清理，检索照常可用。"""
+    from pymilvus import MilvusClient
+
+    from app.core.config import get_settings
+
+    count = store.rebuild_index("data/knowledge_base")
+    assert count > 0
+
+    s = get_settings()
+    client = MilvusClient(uri=s.milvus_uri)
+    target = store._target_collection_name()
+    # 别名指向目标版本
+    assert store._resolve_collection(client, s.kb_alias) == target
+    # 无残留 staging、无旧版本
+    names = client.list_collections()
+    assert names == [target]
+    # 切换后检索照常工作
+    hits = store.search("怎么退货", top_k=3)
+    assert hits
+
+def test_rebuild_failure_keeps_old_version(monkeypatch):
+    """重建中途翻车：旧版本必须原地可用，且 staging 被清理干净。"""
+    from pymilvus import MilvusClient
+
+    from app.core.config import get_settings
+
+    # 先确保有稳定的旧版本（上一步刚重建过）
+    alias = store.alias_name()
+    before = MilvusClient(uri=get_settings().milvus_uri)
+    old_target = store._resolve_collection(before, alias)
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("模拟写入故障")
+
+    monkeypatch.setattr(MilvusClient, "insert", boom)
+    with pytest.raises(RuntimeError, match="旧版本未受影响"):
+        store.rebuild_index("data/knowledge_base")
+
+    monkeypatch.undo()
+    after = MilvusClient(uri=get_settings().milvus_uri)
+    # 别名仍指向旧版本，检索正常
+    assert store._resolve_collection(after, alias) == old_target
+    assert store.search("怎么退货", top_k=1)
+    # staging 集合已清理
+    assert not any(n.endswith("_building") for n in after.list_collections())

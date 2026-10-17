@@ -1,54 +1,76 @@
-"""Milvus 向量库管理。
+"""Milvus 向量库管理（版本化集合 + 蓝绿重建）。
 
 职责：
 - ensure_collection(): 集合不存在则创建（幂等），带固定的索引参数
-- upsert_chunks(): 全量重建知识库数据（删除旧数据再插入）
-- search(): 相似度检索
+- rebuild_index(): 蓝绿重建——新集合构建+冒烟测试通过后才切别名，
+  失败则旧版本继续服务，永不出现"重建到一半检索不可用"
+- search(): 相似度检索（走别名，调用方无感知版本切换）
 
 设计决策：
+- **版本化集合**：集合名含 schema 版本与 embedding 模型指纹，
+  别名（kb_alias）永远指向当前线上版本。
+  - 切分逻辑/表结构变化 → 手动 bump kb_schema_version
+  - 换 embedding 模型 → 模型名进指纹，重建自动生成新集合
+    （注意同步改 embedding_dim，维度不同无法共用集合）
+  旧版本在切换成功后清理，失败时天然保留（回滚 = 不切别名）
 - 用 pymilvus 原生 SDK 而不是 langchain-milvus 封装——
-  schema 显式可控（元数据字段 h1/h2/source 对展示和溯源很重要），
-  也避免多一层抽象导致调试困难
+  schema 显式可控，别名/重建这类运维操作也更直接
 - metric 用 IP（内积）：BGE 归一化向量下内积即余弦相似度（见 embedder.py）
-- 知识库量小（几十条）， Cosmos/Nutzbek 动态字段都不需要，用固定 schema
 """
 
+import hashlib
 import logging
 
 from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
+from pymilvus.exceptions import MilvusException
 
 from app.core.config import get_settings
 from app.rag.embedder import embed_query, embed_texts
 
 logger = logging.getLogger(__name__)
 
-# 集合名固定：本项目只有一个知识库，不做多租户
-COLLECTION_NAME = "kb_chunks"
 
-# 向量维度：BGE-small-zh-v1.5 固定 512 维（换 embedding 模型必须同步改这里并重建集合）
-EMBEDDING_DIM = 512
+def alias_name() -> str:
+    """线上检索别名（调用方永远只认别名，不直接碰版本化集合名）。"""
+    return get_settings().kb_alias
 
+def _legacy_collection_name() -> str:
+    """v0 单集合时代的固定名，用于首次升级时无缝挂别名。"""
+    return get_settings().kb_alias
+
+def _target_collection_name() -> str:
+    """当前配置对应的版本化集合名。
+
+    指纹 = sha1(模型名 | 维度 | schema 版本)：
+    - 换 embedding 模型 → 新指纹 → 新集合（向量空间不同，必须隔离）
+    - 切分逻辑/字段变化 → bump kb_schema_version → 新集合
+    """
+    s = get_settings()
+    fingerprint = hashlib.sha1(
+        f"{s.embedding_model}|{s.embedding_dim}|v{s.kb_schema_version}".encode()
+    ).hexdigest()[:8]
+    return f"{s.kb_alias}_v{s.kb_schema_version}_{fingerprint}"
 
 def _get_client() -> MilvusClient:
     """创建 Milvus 客户端（每次短连接，量小开销可忽略；长连接池在应用层再加）。"""
     return MilvusClient(uri=get_settings().milvus_uri)
 
-
-def ensure_collection(client: MilvusClient) -> None:
+def ensure_collection(client: MilvusClient, name: str) -> None:
     """幂等创建集合：存在则跳过，不存在则建集合 + 索引。
 
     索引参数 AUTOINDEX：Milvus standalone 下自动选择最合适的索引类型，
     开发环境不用手调 IVF/HNSW 参数。
     """
-    if client.has_collection(COLLECTION_NAME):
+    if client.has_collection(name):
         return
 
+    s = get_settings()
     schema = CollectionSchema(
         fields=[
             # 自增主键：Milvus 要求必须有主键
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-            # 向量字段
-            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
+            # 向量字段：维度由配置决定（换 embedding 模型必须同步改 EMBEDDING_DIM）
+            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=s.embedding_dim),
             # 正文：检索命中后要返回给 LLM/前端
             FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=2048),
             # 元数据：溯源与展示用。VARCHAR 必须声明 max_length
@@ -56,7 +78,7 @@ def ensure_collection(client: MilvusClient) -> None:
             FieldSchema(name="h1", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="h2", dtype=DataType.VARCHAR, max_length=128),
         ],
-        description="客服知识库切块",
+        description=f"客服知识库切块 (schema v{s.kb_schema_version})",
     )
 
     index_params = client.prepare_index_params()
@@ -66,37 +88,79 @@ def ensure_collection(client: MilvusClient) -> None:
         metric_type="IP",  # 归一化向量的内积 = 余弦相似度
     )
 
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        schema=schema,
-        index_params=index_params,
-    )
-    logger.info("Milvus 集合已创建: %s", COLLECTION_NAME)
+    client.create_collection(collection_name=name, schema=schema, index_params=index_params)
+    logger.info("Milvus 集合已创建: %s", name)
 
+def _resolve_collection(client: MilvusClient, alias: str) -> str | None:
+    """别名 → 实际集合名。别名不存在时兼容旧的裸集合名（v0 升级过渡）。"""
+    try:
+        desc = client.describe_alias(alias)
+        return desc.get("collection_name")
+    except MilvusException:
+        # describe_alias 对不存在的别名抛 MilvusException，
+        # 这里属于"探测性"调用，异常即"无别名"，回落到 v0 固定集合名
+        logger.debug("别名 %s 不存在，尝试裸集合名", alias)
+        if client.has_collection(alias):
+            return alias
+        return None
+
+def _smoke_test(client: MilvusClient, name: str) -> None:
+    """重建后的冒烟测试：预设业务查询必须命中且分数达标，否则判定新数据不可用。
+
+    这是蓝绿切换的守门员：语料损坏/模型维度配错/切分逻辑翻车，
+    都会在这一步被拦下，旧版本继续服务。
+    """
+    s = get_settings()
+    queries = [q.strip() for q in s.rebuild_smoke_queries.split(",") if q.strip()]
+    for q in queries:
+        results = client.search(
+            collection_name=name,
+            data=[embed_query(q)],
+            limit=1,
+            output_fields=["source"],
+            search_params={"metric_type": "IP"},
+        )
+        hits = results[0]
+        if not hits:
+            raise RuntimeError(f"冒烟测试失败：查询 {q!r} 无命中")
+        top_score = float(hits[0]["distance"])
+        if top_score < s.retrieval_min_score:
+            raise RuntimeError(
+                f"冒烟测试失败：查询 {q!r} 最高分 {top_score:.3f} 低于阈值 {s.retrieval_min_score}"
+            )
+    logger.info("冒烟测试通过: %d 条查询", len(queries))
 
 def rebuild_index(kb_dir: str) -> int:
-    """全量重建：清空旧数据 -> 全部切块 -> 向量化 -> 插入。
+    """蓝绿全量重建：staging 集合构建 → 冒烟测试 → 切别名 → 清理旧版本。
 
-    知识库更新走"全量重建"而非增量：文档量小，重建简单可靠，
-    不需要处理"文档改了但旧块没删干净"的一致性问题。
+    流程（检索可用性全程不受影响，直到最后一步原子切换）：
+      1. 读语料、向量化
+      2. 建 staging 集合并写入（命名 <版本集合名>_building）
+      3. 冒烟测试：预设查询命中且分数达标
+      4. 切别名指向新集合，重命名去掉 _building 后缀
+      5. 清理其余旧版本集合
+    任一步失败：删 staging、抛 RuntimeError，旧版本原样在线。
+
     返回插入的块数。
     """
     from app.rag.splitter import load_and_split_all
 
+    s = get_settings()
     client = _get_client()
-    ensure_collection(client)
+    target = _target_collection_name()
+    staging = f"{target}_building"
+    alias = alias_name()
 
-    # 全量清空：按主键删除需要先查出来，直接 drop+recreate 更省事
-    client.drop_collection(COLLECTION_NAME)
-    ensure_collection(client)
+    # 上次重建中断留下的 staging 一律作废重建
+    if client.has_collection(staging):
+        client.drop_collection(staging)
 
     chunks = load_and_split_all(kb_dir)
     if not chunks:
-        return 0
+        raise RuntimeError("知识库语料为空，拒绝重建（请检查语料目录）")
 
     # 批量向量化（一次调用比逐条快很多，BGE 内部会分批跑）
     vectors = embed_texts([c.content for c in chunks])
-
     rows = [
         {
             "embedding": vec,
@@ -107,24 +171,55 @@ def rebuild_index(kb_dir: str) -> int:
         }
         for c, vec in zip(chunks, vectors, strict=True)
     ]
-    client.insert(collection_name=COLLECTION_NAME, data=rows)
-    # flush：把 growing segment 落盘为 sealed segment。
-    # 不 flush 的话统计与检索可能看不到数据（Milvus 最终一致性），必须显式调用
-    client.flush(COLLECTION_NAME)
 
-    logger.info("知识库重建完成: %d 块", len(rows))
+    try:
+        ensure_collection(client, staging)
+        client.insert(collection_name=staging, data=rows)
+        # flush：把 growing segment 落盘为 sealed segment。
+        # 不 flush 的话统计与检索可能看不到数据（Milvus 最终一致性），必须显式调用
+        client.flush(staging)
+        _smoke_test(client, staging)
+    except Exception as exc:
+        # 蓝绿核心承诺：新版本有任何问题，旧版本继续服务
+        client.drop_collection(staging)
+        raise RuntimeError(f"知识库重建失败（旧版本未受影响）：{exc}") from exc
+
+    # ---- 切换窗口：先清旧集合（别名不能与现存集合同名），最后建别名 ----
+    current = _resolve_collection(client, alias)
+    if client.has_collection(alias) or current:
+        try:
+            client.drop_alias(alias)
+        except MilvusException:
+            # 别名不存在时抛 MilvusException，属预期路径，无需处理
+            logger.debug("drop_alias 跳过（别名 %s 不存在或已清理）", alias)
+    if client.has_collection(target):
+        # 同版本重复重建：先清掉旧 target（此刻已无别名指向它）
+        client.drop_collection(target)
+    client.rename_collection(staging, target)
+
+    # 清理其他历史版本（含 v0 遗留裸集合），只保留当前线上版本
+    prefix = f"{s.kb_alias}_"
+    for name in client.list_collections():
+        if name != target and (name.startswith(prefix) or name == _legacy_collection_name()):
+            client.drop_collection(name)
+            logger.info("已清理旧版本集合: %s", name)
+
+    # 别名创建 = 上线时刻：此后所有检索走新版本
+    client.create_alias(collection_name=target, alias=alias)
+
+    logger.info("知识库蓝绿重建完成: %s (%d 块)", target, len(rows))
     return len(rows)
-
 
 def search(
     query: str,
     top_k: int | None = None,
-    collection_name: str = COLLECTION_NAME,
+    collection_name: str | None = None,
     min_score: float | None = None,
 ) -> list[dict]:
     """语义检索：返回 top_k 个相关块（含相似度分数与元数据）。
 
-    collection_name 参数化：便于测试注入不存在的集合名（异常路径测试）。
+    collection_name 默认走别名（生产口径）；显式传集合名便于测试注入
+    不存在的集合名（异常路径测试）。
     min_score：相似度阈值过滤。None 时读全局配置——低于阈值的命中视为"不相关"，
     直接丢弃而不是塞给 LLM。这是缓解幻觉的第一道闸：宁可"没检到"，不可"检错了"。
     """
@@ -134,13 +229,15 @@ def search(
     threshold = s.retrieval_min_score if min_score is None else min_score
 
     client = _get_client()
-    if not client.has_collection(collection_name):
-        # 集合不存在说明知识库还没入库——显式报错而不是静默返回空，
+    name = collection_name or alias_name()
+    resolved = _resolve_collection(client, name)
+    if resolved is None:
+        # 集合/别名都不存在：说明知识库还没入库——显式报错而不是静默返回空，
         # 让调用方能区分"没建库"和"没检索到"
-        raise RuntimeError("知识库集合不存在，请先执行入库（rebuild_index）")
+        raise RuntimeError("知识库集合不存在，请先执行入库（POST /debug/kb/rebuild）")
 
     results = client.search(
-        collection_name=collection_name,
+        collection_name=resolved,
         data=[embed_query(query)],
         limit=top_k,
         output_fields=["content", "source", "h1", "h2"],

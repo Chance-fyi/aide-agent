@@ -35,6 +35,14 @@ class Settings(BaseSettings):
 
     # ----- Milvus -----
     milvus_uri: str = "http://localhost:19530"
+    # 知识库检索别名：调用方永远只认别名，版本切换时别名原子改指向
+    kb_alias: str = "kb_chunks"
+    # 集合 schema 版本号：切分逻辑/表结构变化时手动 +1，触发新版本集合
+    kb_schema_version: int = 1
+    # embedding 向量维度：换 embedding 模型时必须同步改（bge-small-zh=512，bge-base-zh=768）
+    embedding_dim: int = 512
+    # 蓝绿重建的冒烟测试查询（逗号分隔）：新数据必须能命中这些核心业务问题才准上线
+    rebuild_smoke_queries: str = "退货,退款,发货"
 
     # ----- 业务参数 -----
     history_max_rounds: int = 10
