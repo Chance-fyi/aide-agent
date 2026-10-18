@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from "react";
+import { API_BASE, ROLE, STORAGE_KEY, POLL_INTERVAL_MS, isLiveStatus } from "../constants";
+import { MessageBubble } from "./MessageBubble";
 
 /**
  * 用户端聊天视图。
@@ -6,25 +8,18 @@ import { useState, useRef, useEffect } from "react";
  * 与后端的协议（见 app/api/schemas.py）：
  * - POST /chat { message, thread_id? } → { message, thread_id, transferred }
  * - GET  /chat/{thread_id}/history → { thread_id, status, messages: [{role, content}] }
- *   role 有三种：user（用户）/ bot（机器人）/ agent（人工坐席）
  *
  * 会话连续性设计：
  * - thread_id 存 localStorage，跨天/刷新后重进自动恢复历史消息与转接状态
  * - 转人工后输入框不再禁用：用户补充消息直达坐席工作台（后端落会话记录表）
- * - 前端 4s 轮询 history：用户能看到坐席的回复（模拟长轮询，SSE 属后续迭代）
+ * - 前端轮询 history：用户能看到坐席的回复（模拟长轮询，SSE 属后续迭代）
  */
-
-// .env 里配置后端地址（Vite 约定：VITE_ 前缀才会暴露给前端）
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
-
-// 本地持久化键：同一浏览器跨天回来自动续接上次会话
-const STORAGE_KEY = "shuxingou_thread_id";
 
 // 快捷提问：降低新用户输入门槛，也顺带引导到知识库覆盖率高的问题
 const QUICK_QUESTIONS = ["怎么退货？", "退款多久到账？", "会员积分怎么用？"];
 
 function UserChat() {
-  const [messages, setMessages] = useState([]);       // { role: 'user'|'bot'|'agent', content }
+  const [messages, setMessages] = useState([]);       // { role: 'user'|'agent'|'human', content }
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState(null);     // 会话 ID（多轮记忆的关键）
   const [loading, setLoading] = useState(false);      // 等待后端回复中
@@ -51,7 +46,7 @@ function UserChat() {
         setThreadId(saved);
         setMessages(data.messages ?? []);
         // 恢复转接状态：排队中/处理中都算"已转接"
-        setTransferred(data.status === "queued" || data.status === "in_service");
+        setTransferred(isLiveStatus(data.status));
       } catch {
         // 会话过期/后端清库：静默清掉存档，按新用户处理
         localStorage.removeItem(STORAGE_KEY);
@@ -72,11 +67,11 @@ function UserChat() {
         if (!resp.ok) return;
         const data = await resp.json();
         setMessages(data.messages ?? []);
-        setTransferred(data.status === "queued" || data.status === "in_service");
+        setTransferred(isLiveStatus(data.status));
       } catch {
         // 轮询失败静默：下一轮自动重试，不打扰用户
       }
-    }, 4000);
+    }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [threadId]);
 
@@ -115,13 +110,13 @@ function UserChat() {
       setTransferred(data.transferred);     // 转接后切换状态 UI（输入不再禁用）
       // 坐席已接入后后端返回空 message（不再刷机器人应答），前端不渲染空气泡
       if (data.message) {
-        setMessages((prev) => [...prev, { role: "bot", content: data.message }]);
+        setMessages((prev) => [...prev, { role: ROLE.AGENT, content: data.message }]);
       }
     } catch (err) {
       // 网络失败/后端 503：友好提示而非白屏；detail 里是后端给的可操作文案
       setMessages((prev) => [
         ...prev,
-        { role: "bot", content: err.message || "网络异常，请稍后重试。" },
+        { role: ROLE.AGENT, content: err.message || "网络异常，请稍后重试。" },
       ]);
     } finally {
       setLoading(false);
@@ -183,31 +178,24 @@ function UserChat() {
             </div>
           </div>
         )}
-        {messages.map((m, i) => {
-          /* 用户端布局：用户靠右，客服侧（智能客服 + 人工坐席）都在左；
-             两者靠颜色/头像/标签区分：智能客服蓝色，人工坐席绿色 */
-          const isUser = m.role === "user";
-          const isAgent = m.role === "agent";
-          return (
-            <div key={i} className={`msg-row ${isUser ? "user" : "assistant"}`}>
-              {!isUser && (
-                <span className={`avatar bot ${isAgent ? "agent" : "bot2"}`}>
-                  {isAgent ? "客" : "智"}
-                </span>
-              )}
-              <div className={`msg ${isUser ? "user" : isAgent ? "agent" : "bot"}`}>
-                {!isUser && (
-                  <span className="role-tag">{isAgent ? "人工客服" : "智能客服"}</span>
-                )}
-                {m.content}
-              </div>
-            </div>
-          );
-        })}
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            /* 用户端视角：用户靠右，智能客服/人工客服都靠左 */
+            className={`msg-row ${m.role === ROLE.USER ? "user" : "assistant"}`}
+          >
+            <MessageBubble
+              message={m}
+              bubbleClass={m.role === ROLE.USER ? "user" : m.role === ROLE.HUMAN ? "human" : "agent-view"}
+              withAvatar={m.role !== ROLE.USER}
+              showTag={m.role !== ROLE.USER}
+            />
+          </div>
+        ))}
         {loading && (
           <div className="msg-row assistant">
             <span className="avatar bot bot2">智</span>
-            <div className="msg bot typing"><i /><i /><i /></div>
+            <div className="msg assistant typing"><i /><i /><i /></div>
           </div>
         )}
       </div>

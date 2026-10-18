@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Path
 
 from app.agents import handoff
-from app.api.chat import THREAD_ID_PATTERN
+from app.api.chat import ROLE_HUMAN, THREAD_ID_PATTERN
 from app.api.schemas import AgentActionRequest, AgentReplyRequest
 from app.core.config import get_settings
 
@@ -88,7 +88,7 @@ async def reply_thread(
     if not handoff.is_live_status(status):
         raise HTTPException(status_code=409, detail="该会话不在人工处理中，无法回复")
     try:
-        handoff.append_message(thread_id, "agent", body.content)
+        handoff.append_message(thread_id, ROLE_HUMAN, body.content)
     except Exception:
         logger.exception("坐席回复落库失败 thread=%s", thread_id)
         raise HTTPException(status_code=503, detail="回复发送失败，请重试") from None

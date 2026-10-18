@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { API_BASE, POLL_INTERVAL_MS, isLiveStatus } from "../constants";
+import { MessageBubble, agentViewBubbleClass } from "./MessageBubble";
 
 /**
  * 坐席端控制台（模拟坐席工作台）。
@@ -11,8 +13,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
  *
  * 队列用轮询刷新（MVP 够用，SSE/WebSocket 属于后续流式迭代范围）。
  */
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 // 坐席标识：MVP 阶段固定，真实坐席体系接入后再做登录
 const AGENT_NAME = "agent";
@@ -60,7 +60,7 @@ function AgentConsole() {
   // 队列轮询：4 秒一次，组件卸载时清理定时器
   useEffect(() => {
     refreshQueue();
-    pollRef.current = setInterval(refreshQueue, 4000);
+    pollRef.current = setInterval(refreshQueue, POLL_INTERVAL_MS);
     return () => clearInterval(pollRef.current);
   }, [refreshQueue]);
 
@@ -82,7 +82,7 @@ function AgentConsole() {
       } catch {
         // 轮询失败静默：下轮重试
       }
-    }, 4000);
+    }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [selected]);
 
@@ -218,23 +218,18 @@ function AgentConsole() {
             </div>
             <div className="msg-list" ref={listRef}>
               {history.length === 0 && <div className="queue-empty">加载中…</div>}
-              {history.map((m, i) => {
-                /* 坐席端布局：客户在左，客服侧（智能客服 + 人工坐席）都在右；
-                   两者靠颜色/头像/标签区分：智能客服蓝色，人工坐席绿色 */
-                const onRight = m.role !== "user";
-                const mine = m.role === "agent";
-                return (
-                  <div key={i} className={`msg-row ${onRight ? "user" : "assistant"}`}>
-                    <span className={`avatar bot ${mine ? "agent" : onRight ? "bot2" : "cust"}`}>
-                      {mine ? "客" : onRight ? "智" : "用"}
-                    </span>
-                    <div className={`msg ${mine ? "agent" : onRight ? "bot" : "cust"}`}>
-                      <span className="role-tag">{mine ? "人工坐席" : onRight ? "智能客服" : "客户"}</span>
-                      {m.content}
-                    </div>
-                  </div>
-                );
-              })}
+              {history.map((m, i) => (
+                <div
+                  key={i}
+                  /* 坐席端视角：客户靠左，智能客服/人工坐席都靠右 */
+                  className={`msg-row ${m.role === "user" ? "assistant" : "user"}`}
+                >
+                  <MessageBubble
+                    message={m}
+                    bubbleClass={agentViewBubbleClass(m.role)}
+                  />
+                </div>
+              ))}
             </div>
             {/* 回复栏：坐席主动发消息给用户；备注栏保留用于结束处理时的结果记录 */}
             <div className="reply-bar">

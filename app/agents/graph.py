@@ -42,6 +42,30 @@ _IN_SERVICE_REPLY = "人工客服正在为您服务，请直接描述您的问�
 
 
 # ============================================================
+# 共用小工具
+# ============================================================
+
+def _get_thread_status(thread_id: str, fallback: str) -> str:
+    """查询会话转接状态，查询失败降级为 fallback。
+
+    状态查询失败不能拖垮对话（Postgres 抖动时用户还能继续问答），
+    由调用方按场景传入保守降级值。
+    """
+    try:
+        return handoff.get_status(thread_id)
+    except Exception:
+        logger.exception("转接状态查询失败，按 %s 处理 thread=%s", fallback, thread_id)
+        return fallback
+
+
+def _last_text_message(messages: list[AnyMessage], msg_type: str) -> AnyMessage | None:
+    """从消息列表末尾向前找第一条指定类型且有文本内容的消息；没有则 None。"""
+    return next(
+        (m for m in reversed(messages) if m.type == msg_type and m.text().strip()),
+        None,
+    )
+
+# ============================================================
 # 工具定义
 # ============================================================
 
@@ -154,13 +178,8 @@ def route_input(state: AgentState, config: RunnableConfig) -> str:
     thread_id = config["configurable"]["thread_id"]
 
     # 守卫：受转接影响的会话不再进 agent（排队中/坐席服务中）。
-    # 状态查询失败不能拖垮对话（Postgres 抖动时用户还能继续自助问答），
     # 降级为 active——代价是极端情况下已转接会话多问一轮，可接受
-    try:
-        status = handoff.get_status(thread_id)
-    except Exception:
-        logger.exception("转接状态查询失败，按 active 处理 thread=%s", thread_id)
-        status = handoff.STATUS_ACTIVE
+    status = _get_thread_status(thread_id, handoff.STATUS_ACTIVE)
     if handoff.is_live_status(status):
         return "transfer"
 
@@ -173,10 +192,7 @@ def route_input(state: AgentState, config: RunnableConfig) -> str:
             logger.exception("复位 closed 会话失败 thread=%s", thread_id)
 
     # 关键词兜底：只检查本轮最新一条用户消息
-    last_user = next(
-        (m for m in reversed(state["messages"]) if m.type == "human"),
-        None,
-    )
+    last_user = _last_text_message(state["messages"], "human")
     if last_user:
         text = last_user.content
         if any(kw in text for kw in get_settings().transfer_keyword_list):
@@ -216,22 +232,15 @@ def transfer_node(state: AgentState, config: RunnableConfig):
     （handoff.agent_accept），否则"排队"就名存实亡了。
     """
     thread_id = config["configurable"]["thread_id"]
-    try:
-        status = handoff.get_status(thread_id)
-    except Exception:
-        # 状态不可知时按排队处理，话术偏保守
-        logger.exception("transfer_node 状态查询失败 thread=%s", thread_id)
-        status = handoff.STATUS_QUEUED
+    # 状态不可知时按排队处理，话术偏保守
+    status = _get_thread_status(thread_id, handoff.STATUS_QUEUED)
 
     # 坐席已接入后的重复提醒只会刷屏：首次接入时提示一次，
     # 之后不再追加提示消息（本轮直接不产生回复）。
     # 实现：检查上一条 assistant 消息是否已是接入提示，是则空回复；
     # add_messages reducer 对空列表是追加操作，写空列表即"本轮不产生新消息"
     if status == handoff.STATUS_IN_SERVICE:
-        last_assistant = next(
-            (m for m in reversed(state["messages"]) if m.type == "ai" and m.text().strip()),
-            None,
-        )
+        last_assistant = _last_text_message(state["messages"], "ai")
         if last_assistant and last_assistant.text().strip() == _IN_SERVICE_REPLY:
             return {"messages": []}
         return {"messages": [AIMessage(content=_IN_SERVICE_REPLY)]}

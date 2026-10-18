@@ -68,7 +68,7 @@ def ensure_table() -> None:
             CREATE TABLE IF NOT EXISTS chat_message (
                 id         BIGSERIAL PRIMARY KEY,
                 thread_id  TEXT NOT NULL,
-                role       TEXT NOT NULL,              -- user / bot / agent
+                role       TEXT NOT NULL,              -- user / agent(智能客服) / human(人工坐席)
                 content    TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
@@ -79,7 +79,11 @@ def ensure_table() -> None:
 
 
 def append_message(thread_id: str, role: str, content: str) -> None:
-    """追加一条用户可见的会话记录。失败由调用方决定是否降级（记日志不抛出场景居多）。"""
+    """追加一条用户可见的会话记录。
+
+    role 取值见 app.api.chat 的 ROLE_* 常量：user / agent(智能客服) / human(人工坐席)。
+    失败由调用方决定是否降级（记日志不抛出场景居多）。
+    """
     with _get_conn() as conn:
         conn.execute(
             "INSERT INTO chat_message (thread_id, role, content) VALUES (%s, %s, %s)",

@@ -262,8 +262,8 @@ button:disabled { cursor: not-allowed; }
   border-bottom-left-radius: 4px;
 }
 
-/* 人工坐席消息：绿色调与机器人（蓝）区分，附文字标识（颜色不是唯一手段） */
-.msg.agent {
+/* 人工坐席消息：绿色调与智能客服（蓝）区分，附文字标识（颜色不是唯一手段） */
+.msg.human {
   background: #f0fdf4;
   border: 1px solid #bbf7d0;
   color: var(--text);
@@ -285,7 +285,7 @@ button:disabled { cursor: not-allowed; }
   color: var(--text);
 }
 /* 智能客服消息（坐席端视图）：白底蓝描边，与用户端 assistant 同源但加描边增强区分 */
-.msg.bot {
+.msg.agent-view {
   background: #fff;
   border: 1px solid #bfdbfe;
   color: var(--text);
@@ -297,12 +297,12 @@ button:disabled { cursor: not-allowed; }
   margin-bottom: 2px;
 }
 .msg.cust .role-tag { color: #475569; }
-.msg.bot .role-tag { color: var(--accent); }
-.msg.agent .role-tag { color: #059669; }
+.msg.agent-view .role-tag { color: var(--accent); }
+.msg.human .role-tag { color: #059669; }
 /* 头像：客户灰 / 智能客服蓝 / 人工坐席绿 */
 .avatar.bot.cust { background: #64748b; color: #fff; }
 .avatar.bot.bot2 { background: var(--accent); color: #fff; }
-.avatar.bot.agent { background: #059669; color: #fff; }
+.avatar.bot.human { background: #059669; color: #fff; }
 /* 客服侧行靠右时头像在右侧（.msg-row.user 已 row-reverse），默认的 user 行隐藏头像规则要还原 */
 .agent-layout .msg-row.user .avatar { visibility: visible; }
 
