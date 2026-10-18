@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { API_BASE, AUTH_ROLE, setAuth } from "../constants";
+import { API_BASE, AUTH_ROLE, errorMessage, setAuth } from "../constants";
 
 /**
  * 登录/注册视图（用户端与坐席端共用一个组件，按 role 区分行为）。
@@ -36,7 +36,7 @@ export default function LoginView({ role, onLogin }) {
       });
       const data = await resp.json().catch(() => null);
       if (!resp.ok) {
-        throw new Error(data?.detail || "登录失败，请稍后重试");
+        throw new Error(errorMessage(data, "登录失败，请稍后重试"));
       }
       setAuth(role, data);       // {token, username, role, display_name} 整包入库
       onLogin(data);

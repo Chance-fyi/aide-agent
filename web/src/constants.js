@@ -61,6 +61,24 @@ export function clearAuth(role) {
   localStorage.removeItem(AUTH_KEY[role]);
 }
 
+// 从后端错误响应提取用户可读文案。
+// FastAPI 的 422 参数校验错误 detail 是对象数组（[{loc, msg, type}]），
+// 直接当字符串用会展示成 [object Object]——这里统一归一化
+export function errorMessage(data, fallback) {
+  const detail = data?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    // 取第一条校验错误的 msg（pydantic 文案已是英文，拼上字段位置更友好）
+    const first = detail[0];
+    if (first?.msg) {
+      // loc 形如 ["body", "password"]，去掉首位的 body 得到字段名
+      const field = Array.isArray(first.loc) && first.loc.length > 1 ? first.loc.slice(1).join(".") : null;
+      return field ? `${field}: ${first.msg}` : first.msg;
+    }
+  }
+  return fallback;
+}
+
 // 带认证头的 fetch 封装：所有需要登录态的请求统一走这里。
 // 401（Token 过期/失效）自动清除本地登录态并回调 onAuthExpired，
 // 让组件回到登录页，而不是反复打失败请求

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import {
   API_BASE, AUTH_ROLE, ROLE, STORAGE_KEY, POLL_INTERVAL_MS, isLiveStatus,
-  getAuth, clearAuth, authFetch,
+  getAuth, clearAuth, authFetch, errorMessage,
 } from "../constants";
 import { MessageBubble } from "./MessageBubble";
 import LoginView from "./LoginView";
@@ -125,7 +125,7 @@ function UserChatInner({ auth, onLogout }) {
       if (!resp.ok) {
         // 后端 503 等会带 detail 文案，优先展示给用户而非笼统的"网络异常"
         const data = await resp.json().catch(() => null);
-        throw new Error(data?.detail || `HTTP ${resp.status}`);
+        throw new Error(errorMessage(data, `网络异常（HTTP ${resp.status}），请稍后重试`));
       }
       const data = await resp.json();
 

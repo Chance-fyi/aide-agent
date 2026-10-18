@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   API_BASE, AUTH_ROLE, POLL_INTERVAL_MS, isLiveStatus,
-  getAuth, clearAuth, authFetch,
+  getAuth, clearAuth, authFetch, errorMessage,
 } from "../constants";
 import { MessageBubble, agentViewBubbleClass } from "./MessageBubble";
 import LoginView from "./LoginView";
@@ -144,7 +144,7 @@ function AgentConsoleInner({ auth, onLogout }) {
       if (!resp.ok) {
         const data = await resp.json().catch(() => null);
         // 409 = 工单已被接走/已回退/已关闭：提示刷新而不是报错
-        alert(data?.detail || "操作失败，请刷新队列");
+        alert(errorMessage(data, "操作失败，请刷新队列"));
         return;
       }
       if (action === "close") {
@@ -173,7 +173,7 @@ function AgentConsoleInner({ auth, onLogout }) {
       }, AUTH_ROLE.AGENT, onLogout);
       if (!resp.ok) {
         const data = await resp.json().catch(() => null);
-        alert(data?.detail || "回复发送失败，请重试");
+        alert(errorMessage(data, "回复发送失败，请重试"));
         return;
       }
       setReply("");
