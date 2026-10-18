@@ -1,0 +1,27 @@
+# step-25：用户端与坐席端拆成两个独立页面
+
+## 目标
+
+登录页与工作台原先在同一个 SPA 里用 tab 内部状态切换，
+改为两个真实 URL 页面：`/` 用户端、`/agent` 坐席端。
+
+## 实现要点
+
+- **`web/src/App.jsx`**：
+  - tab 内部状态切换改为路径路由，原生 History API 实现
+    （项目只有两个路径，不值得引入 react-router）
+  - 路径 → 页面用 `ROUTES` 映射表（未来加页面只改这张表），
+    未知路径回退用户端
+  - 切换按钮走 `pushState`；`popstate` 事件同步浏览器前进/后退
+    （注意 `pushState` 不触发 popstate，切换时需手动 setState）
+- 深链支持：直接访问 `/agent`（书签/输入 URL）也能打开坐席端，
+  Vite dev server 自带 SPA history fallback
+
+## 验证方法
+
+- `cd web && npm run build` 通过
+- 手工验证：`/` 与 `/agent` 深链直达、刷新停原页、前进/后退正确切换
+
+## 遗留问题
+
+- 未来页面增多（>3 个）建议引入 react-router 统一管理嵌套路由与守卫

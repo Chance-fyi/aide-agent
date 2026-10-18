@@ -1,4 +1,4 @@
-# step-22：登录功能——双端账号体系（用户端 + 坐席端）
+# step-24：登录功能——双端账号体系（用户端 + 坐席端）
 
 ## 目标
 
@@ -56,3 +56,10 @@
 - 未登录匿名会话仍可自助问答（产品上有意保留）；如需强制登录，
   把 `/chat` 的 `get_optional_user` 换成 `get_current_user` 一行即可
 - 登录态存 localStorage（XSS 风险面与 sessionStorage 相当），后续可上 HttpOnly Cookie
+
+## step-25 补充：双端拆成两个独立页面
+
+- `web/src/App.jsx`：tab 内部状态切换改为路径路由——`/` 用户端、`/agent` 坐席端。
+  原生 History API 实现（项目只有两个路径，不引 react-router），
+  支持 deep link 直达 `/agent`、浏览器刷新/前进后退停在原页面
+- 切换按钮改走 `pushState`，popstate 事件同步前进/后退
