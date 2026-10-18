@@ -7,7 +7,7 @@
       ▼
    route_input（关键词兜底 + 待人工守卫）
       │
-      ├── 命中转接关键词或已是 pending_human ──> transfer ──> END
+      ├── 命中转接关键词或已在排队/服务中 ──> transfer ──> END
       │
       └── 正常消息 ──> agent ⇄ tools ──> END
 
@@ -15,8 +15,8 @@
 1. LLM 自主判断：工具 bind 后由模型决定何时 transfer_to_human
 2. 规则兜底：用户消息命中关键词（"转人工/投诉/退款电话"）时
    **跳过 LLM 直接转接**——防止模型漏判，也省一次 LLM 调用
-3. 状态守卫：会话一旦 pending_human，后续消息不再进 agent，
-   统一回复"坐席接入中"（坐席端在后续迭代实现）
+3. 状态守卫：会话一旦进入排队/服务中，后续消息不再进 agent，
+   统一回复对应话术（坐席端在后续迭代实现）
 """
 
 import logging
@@ -80,7 +80,7 @@ def search_kb(query: str) -> str:
     seen_parents: set[tuple] = set()
     parts: list[str] = []
     for h in hits:
-        parent = h.get("parent_content") or h["content"]  # 兼容旧版本无父块数据
+        parent = h["parent_content"]
         key = (h["source"], h["h1"], h["h2"], parent[:64])
         if key in seen_parents:
             continue
@@ -147,13 +147,13 @@ class AgentState(TypedDict):
 def route_input(state: AgentState, config: RunnableConfig) -> str:
     """入口路由：三级判断（顺序即优先级）。
 
-    1. 会话已是 pending_human → 不再打扰用户和 LLM，直接回复等待话术
+    1. 会话已在排队/坐席服务中 → 不再打扰用户和 LLM，直接回复对应话术
     2. 消息命中转接关键词 → 规则兜底直接转接（跳过 LLM）
     3. 其他 → 正常走 agent
     """
     thread_id = config["configurable"]["thread_id"]
 
-    # 守卫：受转接影响的会话不再进 agent（排队中/坐席服务中/旧版 pending_human）。
+    # 守卫：受转接影响的会话不再进 agent（排队中/坐席服务中）。
     # 状态查询失败不能拖垮对话（Postgres 抖动时用户还能继续自助问答），
     # 降级为 active——代价是极端情况下已转接会话多问一轮，可接受
     try:

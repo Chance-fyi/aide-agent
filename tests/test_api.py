@@ -75,14 +75,16 @@ async def test_chat_keyword_transfer_full_flow(client):
     # 4) 坐席接入 → in_service
     a = await client.post(f"/agent/threads/{tid}/accept", json={"agent_name": "坐席小王"})
     assert a.status_code == 200
-    # 5) 处理结束 → closed；新消息视为新问题回自助（transferred=False）
+    # 5) 处理结束 → closed；新消息视为新问题回自助
     c = await client.post(f"/agent/threads/{tid}/close", json={"resolution": "已解决"})
     assert c.status_code == 200
-    r3 = await client.post("/chat", json={"message": "退货政策是什么", "thread_id": tid})
-    # 走 agent 需要真实 LLM，这里只验证状态已复位（不再被守卫拦死）
-    assert r3.status_code in {200, 503}  # 503 = 本地未配 LLM Key，链路本身已放行
+    # 6) closed 会话发新消息：走关键词消息保证确定性（不依赖真实 LLM）。
+    # 预期：守卫放行（不被拦死）+ 关键词兑底重新转接 → queued
+    r3 = await client.post("/chat", json={"message": "再给我转人工", "thread_id": tid})
+    assert r3.status_code == 200
+    assert r3.json()["transferred"] is True
     h2 = await client.get(f"/chat/{tid}/history")
-    assert h2.json()["status"] in {"active", "closed"}
+    assert h2.json()["status"] == "queued"
 
 async def test_agent_accept_conflict(client):
     """不在排队中的会话不可接入：409 而非 500。"""

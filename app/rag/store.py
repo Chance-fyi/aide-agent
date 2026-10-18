@@ -34,10 +34,6 @@ def alias_name() -> str:
     """线上检索别名（调用方永远只认别名，不直接碰版本化集合名）。"""
     return get_settings().kb_alias
 
-def _legacy_collection_name() -> str:
-    """v0 单集合时代的固定名，用于首次升级时无缝挂别名。"""
-    return get_settings().kb_alias
-
 def _target_collection_name() -> str:
     """当前配置对应的版本化集合名。
 
@@ -94,16 +90,12 @@ def ensure_collection(client: MilvusClient, name: str) -> None:
     logger.info("Milvus 集合已创建: %s", name)
 
 def _resolve_collection(client: MilvusClient, alias: str) -> str | None:
-    """别名 → 实际集合名。别名不存在时兼容旧的裸集合名（v0 升级过渡）。"""
+    """别名 → 实际集合名；别名不存在（未入库）返回 None。"""
     try:
         desc = client.describe_alias(alias)
         return desc.get("collection_name")
     except MilvusException:
-        # describe_alias 对不存在的别名抛 MilvusException，
-        # 这里属于"探测性"调用，异常即"无别名"，回落到 v0 固定集合名
-        logger.debug("别名 %s 不存在，尝试裸集合名", alias)
-        if client.has_collection(alias):
-            return alias
+        # describe_alias 对不存在的别名抛 MilvusException
         return None
 
 def _smoke_test(client: MilvusClient, name: str) -> None:
@@ -200,10 +192,10 @@ def rebuild_index(kb_dir: str) -> int:
         client.drop_collection(target)
     client.rename_collection(staging, target)
 
-    # 清理其他历史版本（含 v0 遗留裸集合），只保留当前线上版本
+    # 清理其他历史版本集合，只保留当前线上版本
     prefix = f"{s.kb_alias}_"
     for name in client.list_collections():
-        if name != target and (name.startswith(prefix) or name == _legacy_collection_name()):
+        if name != target and name.startswith(prefix):
             client.drop_collection(name)
             logger.info("已清理旧版本集合: %s", name)
 

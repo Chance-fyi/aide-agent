@@ -64,19 +64,6 @@ def test_close_from_queued():
     assert handoff.agent_close(tid, "直接答复") is True
     assert handoff.get_status(tid) == handoff.STATUS_CLOSED
 
-def test_legacy_pending_human_treated_as_live():
-    """v1 老数据（pending_human）应视同排队：守卫放行、可被超时回退。"""
-    tid = str(uuid.uuid4())
-    with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
-        conn.execute(
-            "INSERT INTO conversation_status (thread_id, status, reason) VALUES (%s, %s, %s)",
-            (tid, handoff.STATUS_LEGACY_PENDING, "老数据"),
-        )
-    assert handoff.is_live_status(handoff.get_status(tid))
-    # 老数据也应能被坐席接入（兼容升级期的存量工单）
-    assert handoff.agent_accept(tid, "坐席") is False  # accept 只认 queued
-    assert handoff.agent_close(tid, "处理老工单") is True
-
 def test_sweep_timed_out_reverts_only_old_queued():
     """超时回退只影响"超过时限的排队会话"，不碰新排队与 in_service。"""
     # 新排队的：不应被回退

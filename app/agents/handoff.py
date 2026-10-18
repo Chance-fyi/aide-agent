@@ -9,7 +9,6 @@
 - queued：已转接，排队等待坐席；超过 transfer_queue_timeout 后自动回退 active
 - in_service：坐席已接入；由坐席端主动结束，不自动回退
 - closed：坐席处理完成；用户再来新消息视为新问题，回自助服务
-- 遗留状态 pending_human（旧版本）：视同 queued 参与守卫与回退
 
 存储选型：独立 Postgres 表而非 Checkpointer 状态——
 转接状态是"业务事实"（要被坐席端/管理后台查询），而 Checkpointer
@@ -31,11 +30,9 @@ STATUS_ACTIVE = "active"                # 正常自助服务中
 STATUS_QUEUED = "queued"                # 已转接，排队等待坐席接入
 STATUS_IN_SERVICE = "in_service"        # 坐席已接入，处理中
 STATUS_CLOSED = "closed"                # 坐席处理完成
-# v1 版本的状态名，保留兼容：老数据无需迁移，守卫/回退均把它视同 queued
-STATUS_LEGACY_PENDING = "pending_human"
 
 # "会话受转接影响"的状态集合：route_input 守卫与 transferred 标记按此判断
-_LIVE_STATUSES = {STATUS_QUEUED, STATUS_IN_SERVICE, STATUS_LEGACY_PENDING}
+_LIVE_STATUSES = {STATUS_QUEUED, STATUS_IN_SERVICE}
 
 
 def _get_conn() -> psycopg.Connection:
@@ -131,7 +128,7 @@ def agent_close(thread_id: str, resolution: str) -> bool:
                 resolution = %s,
                 reason = COALESCE(reason, '') || ' | 结束: ' || %s,
                 updated_at = now()
-            WHERE thread_id = %s AND status IN (%s, %s, %s)
+            WHERE thread_id = %s AND status IN (%s, %s)
             RETURNING thread_id
             """,
             (
@@ -141,7 +138,6 @@ def agent_close(thread_id: str, resolution: str) -> bool:
                 thread_id,
                 STATUS_QUEUED,
                 STATUS_IN_SERVICE,
-                STATUS_LEGACY_PENDING,
             ),
         ).fetchone()
     if row:
@@ -162,8 +158,8 @@ def reset_active(thread_id: str) -> None:
 def sweep_timed_out() -> list[str]:
     """排队超时回退：太久没人接的排队会话回到 active（用户可继续自助问答）。
 
-    只回退 queued（含遗留 pending_human）：in_service 表示坐席正在处理，
-    更不应自动打断；回退而非关闭，用户再次求助还能重新转接。
+    只回退 queued：in_service 表示坐席正在处理，更不应自动打断；
+    回退而非关闭，用户再次求助还能重新转接。
     """
     timeout_min = get_settings().transfer_queue_timeout_min
     with _get_conn() as conn:
@@ -173,11 +169,11 @@ def sweep_timed_out() -> list[str]:
             SET status = %s,
                 reason = COALESCE(reason, '') || ' [排队超时自动回退]',
                 updated_at = now()
-            WHERE status IN (%s, %s)
+            WHERE status = %s
               AND updated_at < now() - (%s * interval '1 minute')
             RETURNING thread_id
             """,
-            (STATUS_ACTIVE, STATUS_QUEUED, STATUS_LEGACY_PENDING, timeout_min),
+            (STATUS_ACTIVE, STATUS_QUEUED, timeout_min),
         ).fetchall()
     thread_ids = [r[0] for r in rows]
     if thread_ids:

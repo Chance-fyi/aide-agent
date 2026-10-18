@@ -34,6 +34,7 @@ def test_search_kb_normal_hits_include_source(monkeypatch):
         {
             "score": 0.82,
             "content": "自签收之日起 7 天内可申请无理由退货。",
+            "parent_content": "## 退货条件\n\n自签收之日起 7 天内可申请无理由退货。定制类商品除外。",
             "source": "returns.md",
             "h1": "退货政策",
             "h2": "退货条件",
@@ -43,3 +44,5 @@ def test_search_kb_normal_hits_include_source(monkeypatch):
     result = search_kb("退货")
     assert "returns.md" in result
     assert "无理由退货" in result
+    # 父子检索：上下文应取父块（完整小节）而非子块碎片
+    assert "定制类商品除外" in result

@@ -11,11 +11,9 @@ from app.rag import store
 
 @pytest.fixture(scope="module", autouse=True)
 def require_collection():
-    """前置：线上别名必须可用且 schema 为最新。
+    """前置：线上别名必须存在且 schema 为最新。
 
-    - 别名不存在：没入库，直接失败提示
-    - 集合缺 parent_content 字段（v1 旧 schema）：自动触发蓝绿重建升级，
-      旧数据无法平滑加字段，重建是唯一正道（step-15 的别名机制保证不丟线上可用性）
+    无兼容降级（开发期约定）：缺库或缺字段直接 fail，提示手动重建。
     """
     from pymilvus import MilvusClient
 
@@ -30,7 +28,10 @@ def require_collection():
         )
     fields = {f["name"] for f in client.describe_collection(resolved)["fields"]}
     if "parent_content" not in fields:
-        store.rebuild_index("data/knowledge_base")
+        pytest.fail(
+            f"集合 {resolved} 是旧 schema（缺 parent_content 字段），"
+            "请手动升级：bump KB_SCHEMA_VERSION 后 POST /debug/kb/rebuild"
+        )
 
 
 def test_search_returns_relevant_result():
