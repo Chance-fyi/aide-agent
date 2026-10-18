@@ -79,10 +79,11 @@ function AgentConsole() {
   // 轮询选中会话的历史：用户在等待期间补发的消息要能被坐席看到。
   // 与队列轮询同频（4s），记录表读多写少、查询轻量
   useEffect(() => {
-    if (!selected) return;
+    const threadId = selected?.thread_id;
+    if (!threadId) return;
     const timer = setInterval(async () => {
       try {
-        const resp = await fetch(`${API_BASE}/chat/${selected}/history`);
+        const resp = await fetch(`${API_BASE}/chat/${threadId}/history`);
         if (!resp.ok) return;
         const data = await resp.json();
         setHistory(data.messages ?? []);
@@ -94,7 +95,8 @@ function AgentConsole() {
   }, [selected]);
 
   async function openThread(thread) {
-    setSelected({ thread_id: thread.thread_id, status: thread.status });
+    const threadId = thread.thread_id;
+    setSelected({ thread_id: threadId, status: thread.status });
     setHistory([]);
     try {
       const resp = await fetch(`${API_BASE}/chat/${threadId}/history`);
