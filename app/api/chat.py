@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agents import handoff
 from app.agents.runtime import get_graph
+from app.api.deps import OptionalUser
 from app.api.schemas import (
     ChatRequest,
     ChatResponse,
@@ -202,15 +203,28 @@ def _messages_from_checkpointer(state) -> list[SessionMessage]:
 
 @router.get("/chat/{thread_id}/history", response_model=SessionHistoryResponse)
 async def history(
+    user: OptionalUser,  # 依赖参数无默认值，必须放在有默认值的 thread_id 之前
     thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
 ) -> SessionHistoryResponse:
     """会话历史查询：人工坐席端与用户端跨天恢复的数据来源。
+
+    访问控制：登录后，非本人且非坐席不可看别人的会话；
+    未登录请求保持放行（匿名会话无归属，且 thread_id 为 UUID 不可枚举）。
 
     数据源优先级：
     1. 会话记录表 chat_message：包含用户/智能客服/人工坐席的完整消息流
     2. 回退 Checkpointer 快照：step-20 之前的存量会话没有记录表数据，
        保证升级后老会话历史不丢
     """
+    owner = handoff.get_thread_user(thread_id)
+    if (
+        user is not None
+        and owner is not None
+        and owner != user["username"]
+        and user["role"] != "agent"
+    ):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+
     try:
         rows = handoff.get_messages(thread_id)
         if rows:

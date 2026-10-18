@@ -614,3 +614,135 @@ button:disabled { cursor: not-allowed; }
   .queue-panel { width: 100%; border-right: none; border-bottom: 1px solid var(--border); max-height: 40%; }
   .msg { max-width: 88%; }
 }
+
+/* ---------- 登录视图（step-22） ---------- */
+
+.login-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: center;
+}
+
+.login-logo {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto;
+  border-radius: 16px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 24px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-card h1 {
+  font-size: 20px;
+  margin: 4px 0 0;
+}
+
+.login-sub {
+  color: var(--text-sub);
+  font-size: 13px;
+  margin: 0;
+}
+
+.login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
+.login-card input {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text);
+  background: #fff;
+}
+
+.login-card input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.login-error {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 13px;
+  text-align: left;
+}
+
+.login-btn {
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 11px 0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.login-btn:disabled { opacity: 0.6; cursor: default; }
+.login-btn:hover:not(:disabled) { background: var(--primary-dark); }
+
+.login-switch {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+.login-switch:hover { text-decoration: underline; }
+
+/* 登录用户名标识（双端顶栏共用） */
+.login-user {
+  color: var(--text-sub);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* 坐席端队列栏的身份条 */
+.queue-agent {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* 坐席面板内的退出按钮是浅色底，复用 ghost-btn 的深色样式会看不见，单独覆盖 */
+.queue-agent .ghost-btn {
+  color: var(--accent);
+  border-color: var(--border);
+  background: #fff;
+}
+.queue-agent .ghost-btn:hover { background: var(--accent-light); }

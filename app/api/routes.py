@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Path
 
 from app.agents import handoff
 from app.api.chat import ROLE_HUMAN, THREAD_ID_PATTERN
+from app.api.deps import AgentUser
 from app.api.schemas import AgentActionRequest, AgentReplyRequest
 from app.core.config import get_settings
 
@@ -27,15 +28,13 @@ async def health():
     }
 
 
-# ============================================================
 # 坐席操作接口（模拟坐席端/管理后台的数据入口）
-# 鉴权待坐席端迭代统一接入：这两个接口当前仅供内网调试使用
-# ============================================================
-
+# 每个接口要求坐席账号登录（require_agent 依赖），坐席身份取自登录态，
+# 不再信任请求体裸传的 agent_name，杜绝任意人冒充坐席抢单/回复/关闭会话
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
 @agent_router.get("/threads")
-async def list_threads():
+async def list_threads(agent: AgentUser):
     """坐席端队列：所有排队中/处理中的会话，按转接时间先后排序。"""
     try:
         return {"threads": handoff.list_live_threads()}
@@ -45,6 +44,7 @@ async def list_threads():
 
 @agent_router.post("/threads/{thread_id}/accept")
 async def accept_thread(
+    agent: AgentUser,  # 依赖参数无默认值，必须放在有默认值的 body 之前
     thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
     body: AgentActionRequest | None = None,
 ):
@@ -54,7 +54,8 @@ async def accept_thread(
     对坐席端来说是同一个含义——"工单不在队列里了，请刷新"。
     """
     body = body or AgentActionRequest()
-    if not handoff.agent_accept(thread_id, body.agent_name):
+    # 坐席身份以登录态为准（展示昵称优先），请求体里的 agent_name 仅作兼容忽略
+    if not handoff.agent_accept(thread_id, agent["display_name"]):
         raise HTTPException(
             status_code=409,
             detail="该会话不在排队中（可能已被接入、超时回退或不存在）",
@@ -63,6 +64,7 @@ async def accept_thread(
 
 @agent_router.post("/threads/{thread_id}/close")
 async def close_thread(
+    agent: AgentUser,  # 依赖参数无默认值，必须放在有默认值的 body 之前
     thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
     body: AgentActionRequest | None = None,
 ):
@@ -74,6 +76,7 @@ async def close_thread(
 
 @agent_router.post("/threads/{thread_id}/reply")
 async def reply_thread(
+    agent: AgentUser,  # 依赖参数无默认值，必须放在有默认值的 body 之前
     thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
     body: AgentReplyRequest | None = None,
 ):

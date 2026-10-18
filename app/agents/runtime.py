@@ -47,6 +47,8 @@ async def get_graph() -> CompiledStateGraph:
                 _checkpointer = AsyncPostgresSaver(_pool)
                 await _checkpointer.setup()   # 幂等建 Checkpointer 表
                 handoff.ensure_table()        # 幂等建转接状态表
+                from app.core.users import ensure_table as ensure_user_table
+                ensure_user_table()           # 幂等建用户账号表（登录体系）
                 _graph = build_graph_with_memory(_checkpointer)
                 logger.info("Agent 图已初始化（AsyncPostgresSaver）")
     return _graph

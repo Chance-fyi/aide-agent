@@ -30,3 +30,48 @@ export const STORAGE_KEY = "shuxingou_thread_id";
 
 // 轮询间隔（毫秒）：坐席回复/用户补发消息的可见延迟上限
 export const POLL_INTERVAL_MS = 4000;
+
+// ---------- 登录认证（step-22） ----------
+
+// 用户端/坐席端各自的登录态存储键：两端可能同浏览器共存，键必须分开
+export const AUTH_KEY = {
+  user: "shuxingou_auth",
+  agent: "shuxingou_agent_auth",
+};
+
+// 角色枚举（与后端 app_user.role 对应）
+export const AUTH_ROLE = {
+  USER: "user",
+  AGENT: "agent",
+};
+
+export function getAuth(role) {
+  try {
+    return JSON.parse(localStorage.getItem(AUTH_KEY[role]));
+  } catch {
+    return null;
+  }
+}
+
+export function setAuth(role, data) {
+  localStorage.setItem(AUTH_KEY[role], JSON.stringify(data));
+}
+
+export function clearAuth(role) {
+  localStorage.removeItem(AUTH_KEY[role]);
+}
+
+// 带认证头的 fetch 封装：所有需要登录态的请求统一走这里。
+// 401（Token 过期/失效）自动清除本地登录态并回调 onAuthExpired，
+// 让组件回到登录页，而不是反复打失败请求
+export async function authFetch(url, options = {}, role = AUTH_ROLE.USER, onAuthExpired = null) {
+  const auth = getAuth(role);
+  const headers = { ...options.headers };
+  if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
+  const resp = await fetch(url, { ...options, headers });
+  if (resp.status === 401 && onAuthExpired) {
+    clearAuth(role);
+    onAuthExpired();
+  }
+  return resp;
+}

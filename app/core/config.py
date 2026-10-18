@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # 调试接口开关：生产环境置 false，调试路由不注册
     debug: bool = True
 
+    # ----- 登录认证 -----
+    # Token 签名密钥：生产环境必须通过 .env 覆盖为随机长字符串
+    auth_secret: str = "dev-secret-change-me"
+
     # 输入防护开关：注入检测 + 违禁词（guardrails.py）。
     # 关闭后完全跳过规则检查——仅供本地调试，生产必须开启
     input_guardrail: bool = True

@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents import runtime
+from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
 from app.api.routes import agent_router, router
@@ -79,6 +80,7 @@ app = FastAPI(
 )
 
 app.include_router(router)
+app.include_router(auth_router)
 app.include_router(agent_router)
 app.include_router(chat_router)
 register_debug_routes(app)  # 调试路由：debug=False 时不注册

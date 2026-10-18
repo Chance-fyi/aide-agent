@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect } from "react";
-import { API_BASE, ROLE, STORAGE_KEY, POLL_INTERVAL_MS, isLiveStatus } from "../constants";
+import {
+  API_BASE, AUTH_ROLE, ROLE, STORAGE_KEY, POLL_INTERVAL_MS, isLiveStatus,
+  getAuth, clearAuth, authFetch,
+} from "../constants";
 import { MessageBubble } from "./MessageBubble";
+import LoginView from "./LoginView";
 
 /**
  * 用户端聊天视图。
@@ -18,7 +22,21 @@ import { MessageBubble } from "./MessageBubble";
 // 快捷提问：降低新用户输入门槛，也顺带引导到知识库覆盖率高的问题
 const QUICK_QUESTIONS = ["怎么退货？", "退款多久到账？", "会员积分怎么用？"];
 
+/**
+ * 外层组件：只负责登录门卫。
+ * 未登录渲染登录页；登录后挂载真正的聊天组件。
+ * 必须拆两层：hooks 不能出现在条件 return 之后（Rules of Hooks），
+ * 门卫放在无 hooks 的外层即可安全切换登录态
+ */
 function UserChat() {
+  const [auth, setAuth] = useState(() => getAuth(AUTH_ROLE.USER));
+  if (!auth) {
+    return <LoginView role={AUTH_ROLE.USER} onLogin={setAuth} />;
+  }
+  return <UserChatInner auth={auth} onLogout={() => setAuth(null)} />;
+}
+
+function UserChatInner({ auth, onLogout }) {
   const [messages, setMessages] = useState([]);       // { role: 'user'|'agent'|'human', content }
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState(null);     // 会话 ID（多轮记忆的关键）
@@ -31,6 +49,8 @@ function UserChat() {
 
   loadingRef.current = loading;
 
+  const onAuthExpired = onLogout;   // Token 失效：清登录态回登录页
+
   // 挂载时恢复上次会话：有存档且后端还有数据则续接，否则当新会话
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -40,7 +60,9 @@ function UserChat() {
     }
     (async () => {
       try {
-        const resp = await fetch(`${API_BASE}/chat/${saved}/history`);
+        const resp = await authFetch(
+          `${API_BASE}/chat/${saved}/history`, {}, AUTH_ROLE.USER, onAuthExpired,
+        );
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         setThreadId(saved);
@@ -63,7 +85,9 @@ function UserChat() {
     const timer = setInterval(async () => {
       if (loadingRef.current) return;
       try {
-        const resp = await fetch(`${API_BASE}/chat/${threadId}/history`);
+        const resp = await authFetch(
+          `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.USER, onAuthExpired,
+        );
         if (!resp.ok) return;
         const data = await resp.json();
         setMessages(data.messages ?? []);
@@ -90,14 +114,14 @@ function UserChat() {
     setLoading(true);
 
     try {
-      const resp = await fetch(`${API_BASE}/chat`, {
+      const resp = await authFetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text,
           thread_id: threadId,  // 首轮为 null，后端会生成
         }),
-      });
+      }, AUTH_ROLE.USER, onAuthExpired);
       if (!resp.ok) {
         // 后端 503 等会带 detail 文案，优先展示给用户而非笼统的"网络异常"
         const data = await resp.json().catch(() => null);
@@ -150,6 +174,18 @@ function UserChat() {
           </div>
         </div>
         <button className="ghost-btn" onClick={reset}>新会话</button>
+        {/* 当前登录用户与退出登录：双端都可见，明确"我是谁" */}
+        <span className="login-user">{auth.display_name || auth.username}</span>
+        <button
+          className="ghost-btn"
+          onClick={() => {
+            clearAuth(AUTH_ROLE.USER);
+            localStorage.removeItem(STORAGE_KEY);
+            onLogout();
+          }}
+        >
+          退出
+        </button>
       </header>
 
       {/* 转接状态横幅：比只在标题里换文案更醒目，用户不会错过 */}

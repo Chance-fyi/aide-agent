@@ -8,6 +8,7 @@
 agent 路径需要真实 LLM，不进 CI 冒烟（后面评估集迭代覆盖）。
 """
 
+import logging
 import uuid
 
 import httpx
@@ -16,7 +17,28 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.api import chat as chat_mod
+from app.core.security import ROLE_AGENT, create_token
+from app.core.users import create_user, ensure_table
 from app.main import app
+
+# 本测试会话专用的坐席账号：随机用户名避免多次跑测试撞唯一键
+_AGENT_USER = f"test_agent_{uuid.uuid4().hex[:8]}"
+_AGENT_NAME = "坐席小王"
+
+@pytest.fixture(scope="session", autouse=True)
+def _seed_agent_account():
+    """会话级建立坐席账号：需要真实 Postgres（与 handoff 测试同一前提）。"""
+    ensure_table()
+    try:
+        create_user(_AGENT_USER, "test-password", ROLE_AGENT, _AGENT_NAME)
+    except Exception:  # noqa: BLE001
+        # 理论上随机用户名不会冲突；万一同名存在，登录可用即可
+        logging.getLogger(__name__).info("坐席测试账号已存在，跳过创建")
+
+@pytest.fixture
+def agent_headers():
+    """坐席接口的认证头：直接用 Token 函数签发（免登录接口依赖）。"""
+    return {"Authorization": f"Bearer {create_token(_AGENT_USER, ROLE_AGENT)}"}
 
 
 @pytest.fixture
@@ -45,7 +67,7 @@ async def test_chat_overlong_message_rejected(client):
     assert resp.status_code == 422
 
 
-async def test_chat_keyword_transfer_full_flow(client):
+async def test_chat_keyword_transfer_full_flow(client, agent_headers):
     """关键词兜底全流程：转接 → 守卫 → 历史。"""
     # 1) 首条消息命中关键词，触发转接
     r1 = await client.post("/chat", json={"message": "太差劲了，给我转人工"})
@@ -72,11 +94,15 @@ async def test_chat_keyword_transfer_full_flow(client):
     for m in body["messages"]:
         assert m["content"].strip(), "历史里不应有空消息（tool_calls 已过滤）"
 
-    # 4) 坐席接入 → in_service
-    a = await client.post(f"/agent/threads/{tid}/accept", json={"agent_name": "坐席小王"})
+    # 4) 坐席接入 → in_service（需坐席登录态）
+    a = await client.post(
+        f"/agent/threads/{tid}/accept", headers=agent_headers, json={}
+    )
     assert a.status_code == 200
     # 5) 处理结束 → closed；新消息视为新问题回自助
-    c = await client.post(f"/agent/threads/{tid}/close", json={"resolution": "已解决"})
+    c = await client.post(
+        f"/agent/threads/{tid}/close", headers=agent_headers, json={"resolution": "已解决"}
+    )
     assert c.status_code == 200
     # 6) closed 会话发新消息：走关键词消息保证确定性（不依赖真实 LLM）。
     # 预期：守卫放行（不被拦死）+ 关键词兑底重新转接 → queued
@@ -86,15 +112,63 @@ async def test_chat_keyword_transfer_full_flow(client):
     h2 = await client.get(f"/chat/{tid}/history")
     assert h2.json()["status"] == "queued"
 
-async def test_agent_accept_conflict(client):
+async def test_agent_accept_conflict(client, agent_headers):
     """不在排队中的会话不可接入：409 而非 500。"""
-    resp = await client.post(f"/agent/threads/{uuid.uuid4()}/accept", json={})
+    resp = await client.post(
+        f"/agent/threads/{uuid.uuid4()}/accept", headers=agent_headers, json={}
+    )
     assert resp.status_code == 409
 
-async def test_agent_close_conflict(client):
+async def test_agent_close_conflict(client, agent_headers):
     """不存在/非待处理会话不可关闭：409。"""
-    resp = await client.post(f"/agent/threads/{uuid.uuid4()}/close", json={})
+    resp = await client.post(
+        f"/agent/threads/{uuid.uuid4()}/close", headers=agent_headers, json={}
+    )
     assert resp.status_code == 409
+
+# ---------- step-22：登录认证 ----------
+
+async def test_agent_endpoints_require_login(client):
+    """未登录/非坐席访问坐席接口应 401。"""
+    resp = await client.get("/agent/threads")
+    assert resp.status_code == 401
+    resp = await client.post(f"/agent/threads/{uuid.uuid4()}/accept", json={})
+    assert resp.status_code == 401
+
+async def test_register_login_flow(client):
+    """注册即登录 → 登录 → me：完整认证链路。"""
+    username = f"user_{uuid.uuid4().hex[:8]}"
+    r = await client.post(
+        "/auth/register",
+        json={"username": username, "password": "secret123", "display_name": "小张"},
+    )
+    assert r.status_code == 200
+    token = r.json()["token"]
+    assert r.json()["role"] == "user"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    me = await client.get("/auth/me", headers=headers)
+    assert me.status_code == 200
+    assert me.json()["username"] == username
+
+    # 重复注册同名应 400
+    r2 = await client.post(
+        "/auth/register", json={"username": username, "password": "secret123"}
+    )
+    assert r2.status_code == 400
+
+    # 密码错误应 401
+    r3 = await client.post("/auth/login", json={"username": username, "password": "wrong!!"})
+    assert r3.status_code == 401
+
+    # 正确密码登录成功
+    r4 = await client.post("/auth/login", json={"username": username, "password": "secret123"})
+    assert r4.status_code == 200
+
+async def test_me_without_token_401(client):
+    """未登录访问 me 应 401。"""
+    resp = await client.get("/auth/me")
+    assert resp.status_code == 401
 
 
 async def test_history_404(client):

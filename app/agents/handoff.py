@@ -60,6 +60,9 @@ def ensure_table() -> None:
         """)
         conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS agent_name TEXT")
         conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS resolution TEXT")
+        # step-22 登录体系：记录会话归属用户（匿名会话为空），
+        # 用于历史接口的访问控制（非本人且非坐席不可看别人的会话）
+        conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS user_name TEXT")
         # 用户可见的会话记录表：用户/机器人/人工坐席的消息都落在这里。
         # 为什么不用 Checkpointer 当历史源：Checkpointer 是 Agent 执行快照，
         # 坐席回复、纯转达类消息不经过图执行，写不进去；
@@ -227,6 +230,31 @@ def reset_active(thread_id: str) -> None:
             (STATUS_ACTIVE, thread_id),
         )
 
+
+def get_thread_user(thread_id: str) -> str | None:
+    """查会话归属用户；无记录/异常返回 None（不阻断对话主链路）。"""
+    try:
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT user_name FROM conversation_status WHERE thread_id = %s",
+                (thread_id,),
+            ).fetchone()
+            return row[0] if row else None
+    except Exception:
+        logger.exception("会话归属查询失败 thread=%s", thread_id)
+        return None
+
+def set_thread_user(thread_id: str, username: str) -> None:
+    """记录/修正会话归属用户。失败只记日志：归属信息丢失不应打断用户对话。"""
+    try:
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE conversation_status SET user_name = %s, updated_at = now() "
+                "WHERE thread_id = %s",
+                (username, thread_id),
+            )
+    except Exception:
+        logger.exception("会话归属更新失败 thread=%s user=%s", thread_id, username)
 
 def sweep_timed_out() -> list[str]:
     """排队超时回退：太久没人接的排队会话回到 active（用户可继续自助问答）。

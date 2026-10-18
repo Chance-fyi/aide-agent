@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { API_BASE, POLL_INTERVAL_MS, isLiveStatus } from "../constants";
+import {
+  API_BASE, AUTH_ROLE, POLL_INTERVAL_MS, isLiveStatus,
+  getAuth, clearAuth, authFetch,
+} from "../constants";
 import { MessageBubble, agentViewBubbleClass } from "./MessageBubble";
+import LoginView from "./LoginView";
 
 /**
  * 坐席端控制台（模拟坐席工作台）。
@@ -13,9 +17,6 @@ import { MessageBubble, agentViewBubbleClass } from "./MessageBubble";
  *
  * 队列用轮询刷新（MVP 够用，SSE/WebSocket 属于后续流式迭代范围）。
  */
-
-// 坐席标识：MVP 阶段固定，真实坐席体系接入后再做登录
-const AGENT_NAME = "agent";
 
 const STATUS_LABEL = {
   queued: "排队中",
@@ -33,7 +34,19 @@ function timeAgo(iso) {
   return `${Math.floor(min / 60)} 小时前`;
 }
 
+/**
+ * 外层组件：坐席登录门卫（与 UserChat 同样拆两层以满足 Rules of Hooks）。
+ * 坐席账号不开放注册，由管理员用 scripts/create_agent.py 创建
+ */
 function AgentConsole() {
+  const [auth, setAuth] = useState(() => getAuth(AUTH_ROLE.AGENT));
+  if (!auth) {
+    return <LoginView role={AUTH_ROLE.AGENT} onLogin={setAuth} />;
+  }
+  return <AgentConsoleInner auth={auth} onLogout={() => setAuth(null)} />;
+}
+
+function AgentConsoleInner({ auth, onLogout }) {
   const [threads, setThreads] = useState([]);
   const [error, setError] = useState("");
   // 当前查看的会话：{thread_id, status}。存状态对象而非裸 ID，
@@ -49,7 +62,10 @@ function AgentConsole() {
 
   const refreshQueue = useCallback(async () => {
     try {
-      const resp = await fetch(`${API_BASE}/agent/threads`);
+      const resp = await authFetch(
+        `${API_BASE}/agent/threads`, {}, AUTH_ROLE.AGENT, onLogout,
+      );
+      if (resp.status === 401) return;   // authFetch 已清登录态，组件将回到登录页
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       setThreads(data.threads ?? []);
@@ -83,7 +99,9 @@ function AgentConsole() {
     if (!threadId) return;
     const timer = setInterval(async () => {
       try {
-        const resp = await fetch(`${API_BASE}/chat/${threadId}/history`);
+        const resp = await authFetch(
+          `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.AGENT, onLogout,
+        );
         if (!resp.ok) return;
         const data = await resp.json();
         setHistory(data.messages ?? []);
@@ -99,7 +117,9 @@ function AgentConsole() {
     setSelected({ thread_id: threadId, status: thread.status });
     setHistory([]);
     try {
-      const resp = await fetch(`${API_BASE}/chat/${threadId}/history`);
+      const resp = await authFetch(
+        `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.AGENT, onLogout,
+      );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       setHistory(data.messages ?? []);
@@ -113,14 +133,14 @@ function AgentConsole() {
     if (!selected || acting) return;
     setActing(true);
     try {
-      const resp = await fetch(`${API_BASE}/agent/threads/${selected.thread_id}/${action}`, {
+      // 坐席身份取自登录态：后端以 Token 中的账号为准，请求体不再传 agent_name
+      const resp = await authFetch(`${API_BASE}/agent/threads/${selected.thread_id}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          agent_name: AGENT_NAME,
           resolution: action === "close" ? note || "处理完成" : "",
         }),
-      });
+      }, AUTH_ROLE.AGENT, onLogout);
       if (!resp.ok) {
         const data = await resp.json().catch(() => null);
         // 409 = 工单已被接走/已回退/已关闭：提示刷新而不是报错
@@ -146,11 +166,11 @@ function AgentConsole() {
     if (!selected || !text || acting) return;
     setActing(true);
     try {
-      const resp = await fetch(`${API_BASE}/agent/threads/${selected.thread_id}/reply`, {
+      const resp = await authFetch(`${API_BASE}/agent/threads/${selected.thread_id}/reply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: text }),
-      });
+      }, AUTH_ROLE.AGENT, onLogout);
       if (!resp.ok) {
         const data = await resp.json().catch(() => null);
         alert(data?.detail || "回复发送失败，请重试");
@@ -172,6 +192,18 @@ function AgentConsole() {
         <div className="queue-head">
           <h2>待处理队列</h2>
           <span className="queue-count">{threads.length}</span>
+        </div>
+        <div className="queue-agent">
+          <span className="login-user">{auth.display_name || auth.username}</span>
+          <button
+            className="ghost-btn"
+            onClick={() => {
+              clearAuth(AUTH_ROLE.AGENT);
+              onLogout();
+            }}
+          >
+            退出
+          </button>
         </div>
         {error && <div className="queue-error">{error}</div>}
         <div className="queue-list">
