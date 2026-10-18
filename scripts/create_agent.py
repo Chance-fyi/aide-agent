@@ -8,6 +8,11 @@
 """
 
 import sys
+from pathlib import Path
+
+# 直接以 `uv run scripts/create_agent.py` 方式运行时，sys.path 里是 scripts/ 而非项目根，
+# 导入 app 包会 ModuleNotFoundError——把项目根补进 sys.path 兜底
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.security import ROLE_AGENT
 from app.core.users import AuthError, create_user, ensure_table
