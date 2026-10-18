@@ -517,7 +517,13 @@ button:disabled { cursor: not-allowed; }
   background: var(--card);
   border-bottom: 1px solid var(--border);
 }
-.detail-head h2 { font-size: 15px; font-weight: 600; }
+.detail-head h2 {
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .detail-actions { display: flex; gap: 8px; }
 
 .primary-btn, .danger-btn {

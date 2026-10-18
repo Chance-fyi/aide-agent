@@ -36,7 +36,10 @@ function timeAgo(iso) {
 function AgentConsole() {
   const [threads, setThreads] = useState([]);
   const [error, setError] = useState("");
-  const [selected, setSelected] = useState(null);   // 当前查看的 thread_id
+  // 当前查看的会话：{thread_id, status}。存状态对象而非裸 ID，
+  // 因为操作按钮按状态显隐（queued→接入 / in_service→结束），
+  // 队列轮询时同步刷新选中会话的状态，避免按钮与实际状态脱节
+  const [selected, setSelected] = useState(null);
   const [history, setHistory] = useState([]);       // 当前会话的消息
   const [reply, setReply] = useState("");           // 坐席回复用户的输入
   const [note, setNote] = useState("");             // 结束处理时的结果备注
@@ -51,6 +54,10 @@ function AgentConsole() {
       const data = await resp.json();
       setThreads(data.threads ?? []);
       setError("");
+      // 同步选中会话的最新状态（可能已被其他坐席接入/关闭，多坐席并发场景）
+      setSelected((sel) =>
+        sel ? data.threads.find((t) => t.thread_id === sel.thread_id) ?? { ...sel, status: "closed" } : null
+      );
     } catch {
       // 轮询失败不打断页面，只展示提示，下一轮自动重试
       setError("队列刷新失败，正在重试…");
@@ -86,14 +93,15 @@ function AgentConsole() {
     return () => clearInterval(timer);
   }, [selected]);
 
-  async function openThread(threadId) {
-    setSelected(threadId);
+  async function openThread(thread) {
+    setSelected({ thread_id: thread.thread_id, status: thread.status });
     setHistory([]);
     try {
       const resp = await fetch(`${API_BASE}/chat/${threadId}/history`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       setHistory(data.messages ?? []);
+      setSelected((sel) => (sel ? { ...sel, status: data.status } : null));
     } catch {
       setError("会话历史加载失败");
     }
@@ -103,7 +111,7 @@ function AgentConsole() {
     if (!selected || acting) return;
     setActing(true);
     try {
-      const resp = await fetch(`${API_BASE}/agent/threads/${selected}/${action}`, {
+      const resp = await fetch(`${API_BASE}/agent/threads/${selected.thread_id}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -115,9 +123,15 @@ function AgentConsole() {
         const data = await resp.json().catch(() => null);
         // 409 = 工单已被接走/已回退/已关闭：提示刷新而不是报错
         alert(data?.detail || "操作失败，请刷新队列");
+        return;
+      }
+      if (action === "close") {
+        // 结束处理 = 这单办完了：关闭右侧详情回到空态，坐席回到队列继续下一单
+        setSelected(null);
+        setHistory([]);
+        setNote("");
       }
       await refreshQueue();
-      await openThread(selected);   // 重新拉历史，拿到最新状态
     } finally {
       setActing(false);
     }
@@ -130,7 +144,7 @@ function AgentConsole() {
     if (!selected || !text || acting) return;
     setActing(true);
     try {
-      const resp = await fetch(`${API_BASE}/agent/threads/${selected}/reply`, {
+      const resp = await fetch(`${API_BASE}/agent/threads/${selected.thread_id}/reply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: text }),
@@ -171,8 +185,8 @@ function AgentConsole() {
           {threads.map((t) => (
             <button
               key={t.thread_id}
-              className={`queue-item ${selected === t.thread_id ? "selected" : ""} ${t.status}`}
-              onClick={() => openThread(t.thread_id)}
+              className={`queue-item ${selected?.thread_id === t.thread_id ? "selected" : ""} ${t.status}`}
+              onClick={() => openThread(t)}
             >
               <div className="queue-item-top">
                 <span className="thread-id">{t.thread_id.slice(0, 8)}</span>
@@ -198,22 +212,24 @@ function AgentConsole() {
         ) : (
           <>
             <div className="detail-head">
-              <h2>会话 {selected.slice(0, 8)}</h2>
+              <h2>
+                会话 {selected.thread_id.slice(0, 8)}
+                <span className={`badge ${selected.status}`}>{STATUS_LABEL[selected.status] ?? selected.status}</span>
+              </h2>
+              {/* 操作按钮按会话状态显隐：
+                  queued → 接入（接入后才能回复，后端有状态校验）；
+                  in_service → 结束处理；closed → 无操作 */}
               <div className="detail-actions">
-                <button
-                  className="primary-btn"
-                  disabled={acting}
-                  onClick={() => act("accept")}
-                >
-                  接入
-                </button>
-                <button
-                  className="danger-btn"
-                  disabled={acting}
-                  onClick={() => act("close")}
-                >
-                  结束处理
-                </button>
+                {selected.status === "queued" && (
+                  <button className="primary-btn" disabled={acting} onClick={() => act("accept")}>
+                    接入
+                  </button>
+                )}
+                {selected.status === "in_service" && (
+                  <button className="danger-btn" disabled={acting} onClick={() => act("close")}>
+                    结束处理
+                  </button>
+                )}
               </div>
             </div>
             <div className="msg-list" ref={listRef}>
@@ -231,7 +247,9 @@ function AgentConsole() {
                 </div>
               ))}
             </div>
-            {/* 回复栏：坐席主动发消息给用户；备注栏保留用于结束处理时的结果记录 */}
+            {/* 回复栏：仅人工介入中（queued/in_service）可回复；
+                排队中先接入，closed 会话回复与新问题回自助语义冲突 */}
+            {isLiveStatus(selected.status) && (
             <div className="reply-bar">
               <input
                 value={reply}
@@ -253,6 +271,9 @@ function AgentConsole() {
                 </svg>
               </button>
             </div>
+            )}
+            {/* 处理结果备注：仅结束处理时需要，in_service 才显示 */}
+            {selected.status === "in_service" && (
             <div className="resolve-bar">
               <input
                 value={note}
@@ -260,6 +281,7 @@ function AgentConsole() {
                 placeholder="处理结果备注（结束后记录，可选）"
               />
             </div>
+            )}
           </>
         )}
       </section>
