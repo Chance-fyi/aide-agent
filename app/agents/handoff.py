@@ -60,6 +60,48 @@ def ensure_table() -> None:
         """)
         conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS agent_name TEXT")
         conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS resolution TEXT")
+        # 用户可见的会话记录表：用户/机器人/人工坐席的消息都落在这里。
+        # 为什么不用 Checkpointer 当历史源：Checkpointer 是 Agent 执行快照，
+        # 坐席回复、纯转达类消息不经过图执行，写不进去；
+        # 且跨天恢复、坐席端展示都需要按时间序读纯消息流，独立表查询模型更简单
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_message (
+                id         BIGSERIAL PRIMARY KEY,
+                thread_id  TEXT NOT NULL,
+                role       TEXT NOT NULL,              -- user / bot / agent
+                content    TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_message_thread ON chat_message (thread_id, id)"
+        )
+
+
+def append_message(thread_id: str, role: str, content: str) -> None:
+    """追加一条用户可见的会话记录。失败由调用方决定是否降级（记日志不抛出场景居多）。"""
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT INTO chat_message (thread_id, role, content) VALUES (%s, %s, %s)",
+            (thread_id, role, content),
+        )
+
+
+def get_messages(thread_id: str) -> list[dict]:
+    """按时间序读取会话记录；无记录返回空列表（调用方据此决定是否回退旧数据源）。"""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, content, created_at
+            FROM chat_message
+            WHERE thread_id = %s
+            ORDER BY id ASC
+            """,
+            (thread_id,),
+        ).fetchall()
+    return [
+        {"role": r[0], "content": r[1], "ts": r[2].isoformat()} for r in rows
+    ]
 
 
 def list_live_threads() -> list[dict]:

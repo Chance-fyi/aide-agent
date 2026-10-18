@@ -38,7 +38,8 @@ function AgentConsole() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);   // 当前查看的 thread_id
   const [history, setHistory] = useState([]);       // 当前会话的消息
-  const [reply, setReply] = useState("");           // 记录处理结果的输入
+  const [reply, setReply] = useState("");           // 坐席回复用户的输入
+  const [note, setNote] = useState("");             // 结束处理时的结果备注
   const [acting, setActing] = useState(false);      // accept/close 请求进行中
   const listRef = useRef(null);
   const pollRef = useRef(null);
@@ -68,6 +69,23 @@ function AgentConsole() {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [history]);
 
+  // 轮询选中会话的历史：用户在等待期间补发的消息要能被坐席看到。
+  // 与队列轮询同频（4s），记录表读多写少、查询轻量
+  useEffect(() => {
+    if (!selected) return;
+    const timer = setInterval(async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/chat/${selected}/history`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        setHistory(data.messages ?? []);
+      } catch {
+        // 轮询失败静默：下轮重试
+      }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [selected]);
+
   async function openThread(threadId) {
     setSelected(threadId);
     setHistory([]);
@@ -90,7 +108,7 @@ function AgentConsole() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           agent_name: AGENT_NAME,
-          resolution: action === "close" ? reply || "处理完成" : "",
+          resolution: action === "close" ? note || "处理完成" : "",
         }),
       });
       if (!resp.ok) {
@@ -100,6 +118,32 @@ function AgentConsole() {
       }
       await refreshQueue();
       await openThread(selected);   // 重新拉历史，拿到最新状态
+    } finally {
+      setActing(false);
+    }
+  }
+
+  // 坐席回复：写进会话记录表，用户端轮询拉取展示。
+  // 回复后立即刷新本地历史，让坐席马上看到自己刚发的内容
+  async function sendReply() {
+    const text = reply.trim();
+    if (!selected || !text || acting) return;
+    setActing(true);
+    try {
+      const resp = await fetch(`${API_BASE}/agent/threads/${selected}/reply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: text }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => null);
+        alert(data?.detail || "回复发送失败，请重试");
+        return;
+      }
+      setReply("");
+      await openThread(selected);
+    } catch {
+      alert("回复发送失败，请检查网络");
     } finally {
       setActing(false);
     }
@@ -116,7 +160,13 @@ function AgentConsole() {
         {error && <div className="queue-error">{error}</div>}
         <div className="queue-list">
           {threads.length === 0 && !error && (
-            <div className="queue-empty">🎉 暂无待处理会话</div>
+            <div className="queue-empty">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+                <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+              </svg>
+              暂无待处理会话
+            </div>
           )}
           {threads.map((t) => (
             <button
@@ -138,7 +188,13 @@ function AgentConsole() {
       {/* 右侧：会话详情 */}
       <section className="detail-panel">
         {!selected ? (
-          <div className="detail-empty">← 从队列中选择一个会话查看详情</div>
+          <div className="detail-empty">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="14" rx="2" />
+              <path d="M3 8h18" />
+            </svg>
+            从队列中选择一个会话查看详情
+          </div>
         ) : (
           <>
             <div className="detail-head">
@@ -162,17 +218,50 @@ function AgentConsole() {
             </div>
             <div className="msg-list" ref={listRef}>
               {history.length === 0 && <div className="queue-empty">加载中…</div>}
-              {history.map((m, i) => (
-                <div key={i} className={`msg-row ${m.role}`}>
-                  {m.role === "assistant" && <span className="avatar bot">智</span>}
-                  <div className={`msg ${m.role}`}>{m.content}</div>
-                </div>
-              ))}
+              {history.map((m, i) => {
+                /* 坐席端布局：客户在左，客服侧（智能客服 + 人工坐席）都在右；
+                   两者靠颜色/头像/标签区分：智能客服蓝色，人工坐席绿色 */
+                const onRight = m.role !== "user";
+                const mine = m.role === "agent";
+                return (
+                  <div key={i} className={`msg-row ${onRight ? "user" : "assistant"}`}>
+                    <span className={`avatar bot ${mine ? "agent" : onRight ? "bot2" : "cust"}`}>
+                      {mine ? "客" : onRight ? "智" : "用"}
+                    </span>
+                    <div className={`msg ${mine ? "agent" : onRight ? "bot" : "cust"}`}>
+                      <span className="role-tag">{mine ? "人工坐席" : onRight ? "智能客服" : "客户"}</span>
+                      {m.content}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            <div className="resolve-bar">
+            {/* 回复栏：坐席主动发消息给用户；备注栏保留用于结束处理时的结果记录 */}
+            <div className="reply-bar">
               <input
                 value={reply}
                 onChange={(e) => setReply(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendReply()}
+                placeholder="回复客户…（回车发送）"
+                disabled={acting}
+                aria-label="回复客户"
+              />
+              <button
+                className="send-btn"
+                onClick={sendReply}
+                disabled={acting || !reply.trim()}
+                aria-label="发送回复"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                </svg>
+              </button>
+            </div>
+            <div className="resolve-bar">
+              <input
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
                 placeholder="处理结果备注（结束后记录，可选）"
               />
             </div>

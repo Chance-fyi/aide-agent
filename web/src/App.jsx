@@ -14,19 +14,22 @@ function App() {
 
   return (
     <div className="shell">
+      {/* 分段式 tab：外层居中，内层胶囊容器（样式见 index.css .view-tabs-inner） */}
       <nav className="view-tabs">
-        <button
-          className={view === "user" ? "tab active" : "tab"}
-          onClick={() => setView("user")}
-        >
-          用户端
-        </button>
-        <button
-          className={view === "agent" ? "tab active" : "tab"}
-          onClick={() => setView("agent")}
-        >
-          坐席端
-        </button>
+        <div className="view-tabs-inner">
+          <button
+            className={view === "user" ? "tab active" : "tab"}
+            onClick={() => setView("user")}
+          >
+            用户端
+          </button>
+          <button
+            className={view === "agent" ? "tab active" : "tab"}
+            onClick={() => setView("agent")}
+          >
+            坐席端
+          </button>
+        </div>
       </nav>
       <div className="view-body">
         {view === "user" ? <UserChat /> : <AgentConsole />}

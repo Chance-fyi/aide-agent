@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Path
 
 from app.agents import handoff
 from app.api.chat import THREAD_ID_PATTERN
-from app.api.schemas import AgentActionRequest
+from app.api.schemas import AgentActionRequest, AgentReplyRequest
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -71,3 +71,25 @@ async def close_thread(
     if not handoff.agent_close(thread_id, body.resolution or "处理完成"):
         raise HTTPException(status_code=409, detail="该会话不处于待处理状态")
     return {"thread_id": thread_id, "status": handoff.STATUS_CLOSED}
+
+@agent_router.post("/threads/{thread_id}/reply")
+async def reply_thread(
+    thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
+    body: AgentReplyRequest | None = None,
+):
+    """坐席回复消息：写入会话记录表，用户端轮询拉取展示。
+
+    只允许在排队中/处理中状态回复：active 会话没有人工介入的场景，
+    closed 会话回复会与"新问题回自助"语义冲突；误操作时 409 提示刷新。
+    """
+    if body is None:
+        raise HTTPException(status_code=422, detail="回复内容不能为空")
+    status = handoff.get_status(thread_id)
+    if not handoff.is_live_status(status):
+        raise HTTPException(status_code=409, detail="该会话不在人工处理中，无法回复")
+    try:
+        handoff.append_message(thread_id, "agent", body.content)
+    except Exception:
+        logger.exception("坐席回复落库失败 thread=%s", thread_id)
+        raise HTTPException(status_code=503, detail="回复发送失败，请重试") from None
+    return {"thread_id": thread_id, "status": status}

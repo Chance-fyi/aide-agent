@@ -20,6 +20,9 @@ from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+# 已转接状态下用户继续发消息时的应答话术（仅排队中提示一次，不进 LLM，消息本身直达坐席工作台）
+_QUEUED_ACK = "您的消息已收到，人工客服会尽快回复您，请稍候。"
+
 # thread_id 格式约束：服务端生成的是 UUID，历史接口按此校验。
 # 参数化 SQL 本身没有注入风险，这里限制字符集与长度属于纵深防御，
 # 也避免奇形怪状的 ID 进 Checkpointer 与业务表
@@ -65,11 +68,39 @@ async def chat(req: ChatRequest) -> ChatResponse:
         category = guardrails.check_message(req.message)
         if category:
             guardrails.log_rejection(thread_id, category, req.message)
+            reply = guardrails.refusal_reply(category)
+            # 拦截记录也进会话记录表：坐席端能看到用户发了什么、系统为何拦截
+            try:
+                handoff.append_message(thread_id, "user", req.message)
+                handoff.append_message(thread_id, "bot", reply)
+            except Exception:
+                logger.exception("拦截记录落库失败 thread=%s", thread_id)
             return ChatResponse(
-                message=guardrails.refusal_reply(category),
+                message=reply,
                 thread_id=thread_id,
                 transferred=False,
             )
+
+    # 已转接会话（排队中/坐席服务中）：用户消息直达人工工作台，不再消耗 LLM。
+    # 应答话术只回给前端、不落库——它不是对话内容，落库会在坐席端制造噪音；
+    # 代价是刷新后这两条临时应答消失，但用户消息本身已在记录表里，可接受
+    try:
+        status = handoff.get_status(thread_id)
+    except Exception:
+        logger.exception("转接状态查询失败 thread=%s", thread_id)
+        status = handoff.STATUS_ACTIVE
+    if handoff.is_live_status(status):
+        try:
+            handoff.append_message(thread_id, "user", req.message)
+        except Exception:
+            # 落库失败不能吞掉用户的消息：至少让前端知道发送失败，提示重试
+            logger.exception("用户消息落库失败 thread=%s", thread_id)
+            raise HTTPException(status_code=503, detail="消息发送失败，请重试") from None
+        # 排队中：回一句确认话术让用户知道消息没丢；
+        # 坐席已接入：不再回机器人应答（message 置空，前端不渲染气泡）——
+        # 用户此时在和人工对话，每次发言都被机器人"已收到"刷屏反而干扰
+        ack = _QUEUED_ACK if status == handoff.STATUS_QUEUED else ""
+        return ChatResponse(message=ack, thread_id=thread_id, transferred=True)
 
     try:
         graph = await get_graph()
@@ -92,6 +123,14 @@ async def chat(req: ChatRequest) -> ChatResponse:
     if not text.strip():
         logger.warning("chat 生成空回复 thread=%s", thread_id)
         text = "抱歉，刚才的回复没有生成成功，请您再试一次。"
+
+    # 用户消息与回复都进会话记录表：这是用户端跨天恢复、坐席端查看的统一数据源。
+    # 落库失败只记日志：回复本身已生成，因记录表抖动而报错得不偿失
+    try:
+        handoff.append_message(thread_id, "user", req.message)
+        handoff.append_message(thread_id, "bot", text)
+    except Exception:
+        logger.exception("会话记录落库失败 thread=%s", thread_id)
 
     # 状态查询失败不应让已生成的回复报废：降级为"未转接"并记日志。
     # 代价是极端情况下 transferred 标记丢失（前端 UI 少一次提示），可接受
@@ -118,24 +157,29 @@ async def history(
     注意要用 None 输入 invoke（'读取'模式）——只取快照不推进图执行。
     """
     try:
-        graph = await get_graph()
-        config = {"configurable": {"thread_id": thread_id}}
-
-        state = await graph.aget_state(config)
-        if not state or not state.values.get("messages"):
-            raise HTTPException(status_code=404, detail="会话不存在")
-
-        messages = [
-            SessionMessage(
-                role="user" if isinstance(m, HumanMessage) else "assistant",
-                content=m.text(),
-            )
-            for m in state.values["messages"]
-            if isinstance(m, (HumanMessage, AIMessage))
-            # 过滤掉 tool_calls 中间消息（content 为空的 AIMessage）：
-            # 它是 Agent 内部的"工具调用记录"，不是要展示给用户的对话内容
-            and not (isinstance(m, AIMessage) and not m.text().strip())
-        ]
+        # 优先从会话记录表读：包含用户/机器人/人工坐席的完整消息流。
+        rows = handoff.get_messages(thread_id)
+        if rows:
+            messages = [SessionMessage(role=r["role"], content=r["content"], ts=r["ts"]) for r in rows]
+        else:
+            # 回退：step-15 之前的存量会话没有记录表数据，从 Checkpointer 快照恢复，
+            # 保证升级后老会话历史不丢。角色统一映射为 bot（当时没有人工消息）
+            graph = await get_graph()
+            config = {"configurable": {"thread_id": thread_id}}
+            state = await graph.aget_state(config)
+            if not state or not state.values.get("messages"):
+                raise HTTPException(status_code=404, detail="会话不存在")
+            messages = [
+                SessionMessage(
+                    role="user" if isinstance(m, HumanMessage) else "bot",
+                    content=m.text(),
+                )
+                for m in state.values["messages"]
+                if isinstance(m, (HumanMessage, AIMessage))
+                # 过滤掉 tool_calls 中间消息（content 为空的 AIMessage）：
+                # 它是 Agent 内部的"工具调用记录"，不是要展示给用户的对话内容
+                and not (isinstance(m, AIMessage) and not m.text().strip())
+            ]
         status = handoff.get_status(thread_id)
     except HTTPException:
         raise  # 业务性 404 直接透传，不进"服务不可用"分支

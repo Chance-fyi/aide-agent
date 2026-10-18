@@ -222,8 +222,21 @@ def transfer_node(state: AgentState, config: RunnableConfig):
         # 状态不可知时按排队处理，话术偏保守
         logger.exception("transfer_node 状态查询失败 thread=%s", thread_id)
         status = handoff.STATUS_QUEUED
-    reply = _IN_SERVICE_REPLY if status == handoff.STATUS_IN_SERVICE else _PENDING_HUMAN_REPLY
-    return {"messages": [AIMessage(content=reply)]}
+
+    # 坐席已接入后的重复提醒只会刷屏：首次接入时提示一次，
+    # 之后不再追加提示消息（本轮直接不产生回复）。
+    # 实现：检查上一条 assistant 消息是否已是接入提示，是则空回复；
+    # add_messages reducer 对空列表是追加操作，写空列表即"本轮不产生新消息"
+    if status == handoff.STATUS_IN_SERVICE:
+        last_assistant = next(
+            (m for m in reversed(state["messages"]) if m.type == "ai" and m.text().strip()),
+            None,
+        )
+        if last_assistant and last_assistant.text().strip() == _IN_SERVICE_REPLY:
+            return {"messages": []}
+        return {"messages": [AIMessage(content=_IN_SERVICE_REPLY)]}
+
+    return {"messages": [AIMessage(content=_PENDING_HUMAN_REPLY)]}
 
 
 # ============================================================

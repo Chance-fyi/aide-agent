@@ -45,3 +45,17 @@ class AgentActionRequest(BaseModel):
 
     agent_name: str = Field(default="agent", max_length=64, description="坐席标识")
     resolution: str = Field(default="", max_length=500, description="处理结果（close 时使用）")
+
+class AgentReplyRequest(BaseModel):
+    """坐席回复消息：写入会话记录表，用户端轮询拉取展示。"""
+
+    content: str = Field(..., min_length=1, max_length=2000, description="回复内容")
+
+    @field_validator("content")
+    @classmethod
+    def strip_content(cls, v: str) -> str:
+        """去首尾空白后拒绝纯空白：与用户消息同一口径，避免空消息进记录表。"""
+        v = v.strip()
+        if not v:
+            raise ValueError("回复内容不能为空白")
+        return v

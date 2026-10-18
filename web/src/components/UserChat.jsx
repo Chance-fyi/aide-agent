@@ -5,24 +5,80 @@ import { useState, useRef, useEffect } from "react";
  *
  * 与后端的协议（见 app/api/schemas.py）：
  * - POST /chat { message, thread_id? } → { message, thread_id, transferred }
- * - thread_id 首轮由后端生成，前端存下后原样携带即可延续多轮
- * - transferred=true 表示已转人工，输入框禁用并显示等待提示
+ * - GET  /chat/{thread_id}/history → { thread_id, status, messages: [{role, content}] }
+ *   role 有三种：user（用户）/ bot（机器人）/ agent（人工坐席）
+ *
+ * 会话连续性设计：
+ * - thread_id 存 localStorage，跨天/刷新后重进自动恢复历史消息与转接状态
+ * - 转人工后输入框不再禁用：用户补充消息直达坐席工作台（后端落会话记录表）
+ * - 前端 4s 轮询 history：用户能看到坐席的回复（模拟长轮询，SSE 属后续迭代）
  */
 
 // .env 里配置后端地址（Vite 约定：VITE_ 前缀才会暴露给前端）
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
+// 本地持久化键：同一浏览器跨天回来自动续接上次会话
+const STORAGE_KEY = "shuxingou_thread_id";
+
 // 快捷提问：降低新用户输入门槛，也顺带引导到知识库覆盖率高的问题
 const QUICK_QUESTIONS = ["怎么退货？", "退款多久到账？", "会员积分怎么用？"];
 
 function UserChat() {
-  const [messages, setMessages] = useState([]);       // { role: 'user'|'assistant', content }
+  const [messages, setMessages] = useState([]);       // { role: 'user'|'bot'|'agent', content }
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState(null);     // 会话 ID（多轮记忆的关键）
   const [loading, setLoading] = useState(false);      // 等待后端回复中
   const [transferred, setTransferred] = useState(false); // 是否已转人工
+  const [restored, setRestored] = useState(false);    // 历史恢复是否完成（避免恢复期间闪欢迎页）
   const listRef = useRef(null);                       // 自动滚到底部用
   const inputRef = useRef(null);                      // 新会话后焦点回输入框
+  const loadingRef = useRef(false);                   // 轮询跳过发送中的请求（闭包里的 loading 会过期）
+
+  loadingRef.current = loading;
+
+  // 挂载时恢复上次会话：有存档且后端还有数据则续接，否则当新会话
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) {
+      setRestored(true);
+      return;
+    }
+    (async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/chat/${saved}/history`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        setThreadId(saved);
+        setMessages(data.messages ?? []);
+        // 恢复转接状态：排队中/处理中都算"已转接"
+        setTransferred(data.status === "queued" || data.status === "in_service");
+      } catch {
+        // 会话过期/后端清库：静默清掉存档，按新用户处理
+        localStorage.removeItem(STORAGE_KEY);
+      } finally {
+        setRestored(true);
+      }
+    })();
+  }, []);
+
+  // 轮询拉取会话记录：主要为了收到人工坐席的回复。
+  // 发送中跳过本轮，避免轮询结果覆盖本地乐观消息
+  useEffect(() => {
+    if (!threadId) return;
+    const timer = setInterval(async () => {
+      if (loadingRef.current) return;
+      try {
+        const resp = await fetch(`${API_BASE}/chat/${threadId}/history`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        setMessages(data.messages ?? []);
+        setTransferred(data.status === "queued" || data.status === "in_service");
+      } catch {
+        // 轮询失败静默：下一轮自动重试，不打扰用户
+      }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [threadId]);
 
   // 消息变化时滚动到底部
   useEffect(() => {
@@ -31,7 +87,7 @@ function UserChat() {
 
   async function send(textArg) {
     const text = (textArg ?? input).trim();
-    if (!text || loading || transferred) return;
+    if (!text || loading) return;   // 转人工后仍可发消息，只拦"发送中"
 
     // 乐观更新：立刻显示用户消息
     setMessages((prev) => [...prev, { role: "user", content: text }]);
@@ -55,13 +111,17 @@ function UserChat() {
       const data = await resp.json();
 
       setThreadId(data.thread_id);          // 记住会话 ID，后续多轮携带
-      setTransferred(data.transferred);     // 转接后禁用输入
-      setMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
+      localStorage.setItem(STORAGE_KEY, data.thread_id);  // 跨天恢复的凭据
+      setTransferred(data.transferred);     // 转接后切换状态 UI（输入不再禁用）
+      // 坐席已接入后后端返回空 message（不再刷机器人应答），前端不渲染空气泡
+      if (data.message) {
+        setMessages((prev) => [...prev, { role: "bot", content: data.message }]);
+      }
     } catch (err) {
       // 网络失败/后端 503：友好提示而非白屏；detail 里是后端给的可操作文案
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: err.message || "网络异常，请稍后重试。" },
+        { role: "bot", content: err.message || "网络异常，请稍后重试。" },
       ]);
     } finally {
       setLoading(false);
@@ -70,10 +130,11 @@ function UserChat() {
   }
 
   function reset() {
-    // "新会话"：清空本地状态即可，thread_id 置空后端会开新会话
+    // "新会话"：清空本地状态与存档，thread_id 置空后端会开新会话
     setMessages([]);
     setThreadId(null);
     setTransferred(false);
+    localStorage.removeItem(STORAGE_KEY);
     inputRef.current?.focus();
   }
 
@@ -86,7 +147,7 @@ function UserChat() {
             <h1>舒心购智能客服</h1>
             <span className="subtitle">
               {transferred
-                ? "已为您转接人工客服"
+                ? "人工客服会话中"
                 : threadId
                   ? `会话 ${threadId.slice(0, 8)}`
                   : "在线 · 有什么可以帮您？"}
@@ -100,14 +161,19 @@ function UserChat() {
       {transferred && (
         <div className="transfer-banner">
           <span className="dot pulse" />
-          已转接人工，客服正在处理，请耐心等待…
+          已转接人工，您可以继续补充问题，客服会尽快回复
         </div>
       )}
 
       <div className="msg-list" ref={listRef}>
-        {messages.length === 0 && (
+        {restored && messages.length === 0 && (
           <div className="welcome">
-            <div className="welcome-icon">💬</div>
+            {/* SVG 图标替代 emoji：跨平台渲染一致，且可用 token 控制颜色 */}
+            <div className="welcome-icon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+              </svg>
+            </div>
             <p className="welcome-title">您好，我是舒心购智能助手</p>
             <p className="welcome-sub">可以点击下面的问题快速开始，也可以直接输入</p>
             <div className="chips">
@@ -117,16 +183,31 @@ function UserChat() {
             </div>
           </div>
         )}
-        {messages.map((m, i) => (
-          <div key={i} className={`msg-row ${m.role}`}>
-            {m.role === "assistant" && <span className="avatar bot">智</span>}
-            <div className={`msg ${m.role}`}>{m.content}</div>
-          </div>
-        ))}
+        {messages.map((m, i) => {
+          /* 用户端布局：用户靠右，客服侧（智能客服 + 人工坐席）都在左；
+             两者靠颜色/头像/标签区分：智能客服蓝色，人工坐席绿色 */
+          const isUser = m.role === "user";
+          const isAgent = m.role === "agent";
+          return (
+            <div key={i} className={`msg-row ${isUser ? "user" : "assistant"}`}>
+              {!isUser && (
+                <span className={`avatar bot ${isAgent ? "agent" : "bot2"}`}>
+                  {isAgent ? "客" : "智"}
+                </span>
+              )}
+              <div className={`msg ${isUser ? "user" : isAgent ? "agent" : "bot"}`}>
+                {!isUser && (
+                  <span className="role-tag">{isAgent ? "人工客服" : "智能客服"}</span>
+                )}
+                {m.content}
+              </div>
+            </div>
+          );
+        })}
         {loading && (
           <div className="msg-row assistant">
-            <span className="avatar bot">智</span>
-            <div className="msg assistant typing"><i /><i /><i /></div>
+            <span className="avatar bot bot2">智</span>
+            <div className="msg bot typing"><i /><i /><i /></div>
           </div>
         )}
       </div>
@@ -137,12 +218,20 @@ function UserChat() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder={transferred ? "人工客服处理中，暂无需回复" : "输入消息，回车发送"}
-          disabled={transferred || loading}
+          placeholder={transferred ? "补充问题，人工客服会看到" : "输入消息，回车发送"}
+          disabled={loading}
           autoFocus
         />
-        <button onClick={() => send()} disabled={transferred || loading || !input.trim()}>
-          发送
+        <button
+          className="send-btn"
+          onClick={() => send()}
+          disabled={loading || !input.trim()}
+          aria-label="发送消息"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <line x1="22" y1="2" x2="11" y2="13" />
+            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
         </button>
       </footer>
     </div>
