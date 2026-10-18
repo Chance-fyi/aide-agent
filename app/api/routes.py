@@ -34,6 +34,15 @@ async def health():
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
+@agent_router.get("/threads")
+async def list_threads():
+    """坐席端队列：所有排队中/处理中的会话，按转接时间先后排序。"""
+    try:
+        return {"threads": handoff.list_live_threads()}
+    except Exception:
+        logger.exception("坐席端队列查询失败")
+        raise HTTPException(status_code=503, detail="队列查询暂时不可用，请稍后重试") from None
+
 @agent_router.post("/threads/{thread_id}/accept")
 async def accept_thread(
     thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),

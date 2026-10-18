@@ -62,6 +62,33 @@ def ensure_table() -> None:
         conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS resolution TEXT")
 
 
+def list_live_threads() -> list[dict]:
+    """列出所有待处理/处理中的会话（坐席端队列数据源）。
+
+    只查业务表，不碰 Checkpointer：队列刷新是高频操作，
+    轻量查询优先，消息内容由前端按需再调 /chat/{id}/history 获取。
+    """
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT thread_id, status, reason, agent_name, updated_at
+            FROM conversation_status
+            WHERE status = ANY(%s)
+            ORDER BY updated_at ASC           -- 先转接的排前面，先进先出
+            """,
+            (list(_LIVE_STATUSES),),
+        ).fetchall()
+    return [
+        {
+            "thread_id": r[0],
+            "status": r[1],
+            "reason": r[2],
+            "agent_name": r[3],
+            "updated_at": r[4].isoformat(),
+        }
+        for r in rows
+    ]
+
 def get_status(thread_id: str) -> str:
     """查询会话当前状态；无记录视为 active。"""
     with _get_conn() as conn:
