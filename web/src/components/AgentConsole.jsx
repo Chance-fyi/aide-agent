@@ -114,7 +114,8 @@ function AgentConsoleInner({ auth, onLogout }) {
 
   async function openThread(thread) {
     const threadId = thread.thread_id;
-    setSelected({ thread_id: threadId, status: thread.status });
+    // 整包存队列项：user_name 供详情标题展示，status 供操作按钮显隐
+    setSelected({ thread_id: threadId, status: thread.status, user_name: thread.user_name });
     setHistory([]);
     try {
       const resp = await authFetch(
@@ -223,7 +224,10 @@ function AgentConsoleInner({ auth, onLogout }) {
               onClick={() => openThread(t)}
             >
               <div className="queue-item-top">
-                <span className="thread-id">{t.thread_id.slice(0, 8)}</span>
+                {/* 优先显示登录用户名；匿名会话回退 thread_id 前 8 位 */}
+                <span className="thread-id">
+                  {t.user_name || `游客 ${t.thread_id.slice(0, 8)}`}
+                </span>
                 <span className={`badge ${t.status}`}>{STATUS_LABEL[t.status] ?? t.status}</span>
               </div>
               <div className="queue-reason">{t.reason || "（无转接原因）"}</div>
@@ -247,7 +251,7 @@ function AgentConsoleInner({ auth, onLogout }) {
           <>
             <div className="detail-head">
               <h2>
-                会话 {selected.thread_id.slice(0, 8)}
+                {selected.user_name || `游客 ${selected.thread_id.slice(0, 8)}`}
                 <span className={`badge ${selected.status}`}>{STATUS_LABEL[selected.status] ?? selected.status}</span>
               </h2>
               {/* 操作按钮按会话状态显隐：

@@ -120,7 +120,7 @@ def list_live_threads() -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT thread_id, status, reason, agent_name, updated_at
+            SELECT thread_id, status, reason, agent_name, updated_at, user_name
             FROM conversation_status
             WHERE status = ANY(%s)
             ORDER BY updated_at ASC           -- 先转接的排前面，先进先出
@@ -134,6 +134,7 @@ def list_live_threads() -> list[dict]:
             "reason": r[2],
             "agent_name": r[3],
             "updated_at": r[4].isoformat(),
+            "user_name": r[5],
         }
         for r in rows
     ]

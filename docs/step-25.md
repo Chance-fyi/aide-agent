@@ -34,3 +34,10 @@
   字符串直接用；数组取第一条校验错误，拼上字段名（如 `password: String should
   have at least 6 characters`）；其余用兜底文案
 - `LoginView` / `UserChat` / `AgentConsole` 四处错误展示统一改走该函数
+
+## step-25.3：坐席端用用户名替代 thread_id 展示
+
+- `handoff.list_live_threads` 响应新增 `user_name` 字段（会话归属账号，
+  step-24 已落库）；匿名会话为 null
+- 坐席端队列列表与详情标题改为显示用户名，匿名会话回退 `游客 {thread_id 前 8 位}`；
+  `openThread` 把队列项整包存入 selected，详情标题才能拿到 user_name
