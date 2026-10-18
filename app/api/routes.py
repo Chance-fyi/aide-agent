@@ -79,14 +79,16 @@ async def reply_thread(
 ):
     """坐席回复消息：写入会话记录表，用户端轮询拉取展示。
 
-    只允许在排队中/处理中状态回复：active 会话没有人工介入的场景，
-    closed 会话回复会与"新问题回自助"语义冲突；误操作时 409 提示刷新。
+    只允许在处理中（in_service）状态回复：
+    - queued（未接入）不能回复：接入是占位动作（防多坐席抢单 + 状态推进），
+      未接入就能回复会让接入形同虚设
+    - active 会话没有人工介入的场景；closed 回复与新问题回自助语义冲突
     """
     if body is None:
         raise HTTPException(status_code=422, detail="回复内容不能为空")
     status = handoff.get_status(thread_id)
-    if not handoff.is_live_status(status):
-        raise HTTPException(status_code=409, detail="该会话不在人工处理中，无法回复")
+    if status != handoff.STATUS_IN_SERVICE:
+        raise HTTPException(status_code=409, detail="请先接入该会话再回复")
     try:
         handoff.append_message(thread_id, ROLE_HUMAN, body.content)
     except Exception:

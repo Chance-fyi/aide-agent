@@ -249,9 +249,8 @@ function AgentConsole() {
                 </div>
               ))}
             </div>
-            {/* 回复栏：仅人工介入中（queued/in_service）可回复；
-                排队中先接入，closed 会话回复与新问题回自助语义冲突 */}
-            {isLiveStatus(selected.status) && (
+            {/* 回复栏：仅接入后（in_service）显示；排队中可看记录但须先接入再回复 */}
+            {selected.status === "in_service" && (
             <div className="reply-bar">
               <input
                 value={reply}
