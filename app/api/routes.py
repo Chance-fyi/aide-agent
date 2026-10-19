@@ -10,7 +10,12 @@ from fastapi import APIRouter, HTTPException, Path
 from app.agents import handoff
 from app.api.chat import ROLE_HUMAN, THREAD_ID_PATTERN
 from app.api.deps import AgentUser
-from app.api.schemas import AgentActionRequest, AgentReplyRequest
+from app.api.schemas import (
+    AgentActionRequest,
+    AgentReplyRequest,
+    AgentUserHistoryResponse,
+    SessionMessage,
+)
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +70,39 @@ async def accept_thread(
             detail="该会话不在排队中（可能已被接入、超时回退或不存在）",
         )
     return {"thread_id": thread_id, "status": handoff.STATUS_IN_SERVICE}
+
+@agent_router.get("/threads/{thread_id}/user_history", response_model=AgentUserHistoryResponse)
+async def user_history(
+    agent: AgentUser,  # 依赖参数无默认值，必须放在有默认值的 path 参数之前
+    thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
+) -> AgentUserHistoryResponse:
+    """查该会话归属用户的全部历史消息（跨 thread 合并、时间序）。
+
+    坐席接入前了解用户来龙去脉：同一用户以前问过什么、上一单怎么处理的，
+    避免让用户重复叙述。仅要求坐席登录，不限定是否接入者——
+    接入前也需要看历史来决定是否抢单。
+    """
+    owner_id = handoff.get_thread_user(thread_id)
+    if owner_id is None:
+        # 匿名会话（无归属）没有历史可查，返回空列表而非 404，
+        # 前端统一渲染"暂无历史"，不用为匿名场景做特殊分支
+        return AgentUserHistoryResponse(user_display_name=None, messages=[])
+    try:
+        rows = handoff.get_user_messages(owner_id)
+        owner_name = None
+        with handoff._get_conn() as conn:
+            row = conn.execute(
+                "SELECT display_name FROM app_user WHERE id = %s", (owner_id,)
+            ).fetchone()
+            if row:
+                owner_name = row[0]
+    except Exception:
+        logger.exception("用户历史查询失败 thread=%s", thread_id)
+        raise HTTPException(status_code=503, detail="历史查询暂时不可用，请稍后重试") from None
+    return AgentUserHistoryResponse(
+        user_display_name=owner_name,
+        messages=[SessionMessage(**m) for m in rows],
+    )
 
 @agent_router.post("/threads/{thread_id}/close")
 async def close_thread(

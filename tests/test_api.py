@@ -171,6 +171,39 @@ async def test_in_service_thread_locked_to_owner(client, agent_headers, agent2_h
     )
     assert r4.status_code == 200
 
+async def test_agent_user_history(client, agent_headers):
+    """坐席可查会话归属用户的跨 thread 历史消息；匿名会话返回空列表。"""
+    # 匿名会话：无归属用户 → 空列表而非报错
+    r = await client.post("/chat", json={"message": "转人工"})
+    anon_tid = r.json()["thread_id"]
+    h0 = await client.get(
+        f"/agent/threads/{anon_tid}/user_history", headers=agent_headers
+    )
+    assert h0.status_code == 200
+    assert h0.json()["messages"] == []
+
+    # 登录用户发消息触发转接：历史里应能看到这条用户消息
+    username = f"hist_{uuid.uuid4().hex[:8]}"
+    reg = await client.post(
+        "/auth/register",
+        json={"username": username, "password": "secret123", "display_name": "老用户"},
+    )
+    user_headers = {"Authorization": f"Bearer {reg.json()['token']}"}
+    r2 = await client.post(
+        "/chat", json={"message": "我要投诉，转人工"}, headers=user_headers
+    )
+    tid = r2.json()["thread_id"]
+
+    h = await client.get(f"/agent/threads/{tid}/user_history", headers=agent_headers)
+    assert h.status_code == 200
+    body = h.json()
+    assert body["user_display_name"] == "老用户"
+    roles = [m["role"] for m in body["messages"]]
+    assert "user" in roles
+
+    # 未登录不可查（坐席接口统一认证门卫）
+    assert (await client.get(f"/agent/threads/{tid}/user_history")).status_code == 401
+
 async def test_agent_close_conflict(client, agent_headers):
     """不存在/非待处理会话不可关闭：409。"""
     resp = await client.post(

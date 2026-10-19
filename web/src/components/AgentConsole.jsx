@@ -57,6 +57,9 @@ function AgentConsoleInner({ auth, onLogout }) {
   // 队列轮询时同步刷新选中会话的状态，避免按钮与实际状态脱节
   const [selected, setSelected] = useState(null);
   const [history, setHistory] = useState([]);       // 当前会话的消息
+  // 用户历史会话侧栏：坐席接入前了解用户来龙去脉，避免用户重复叙述
+  const [userHistory, setUserHistory] = useState(null);   // null = 侧栏关闭
+  const [userHistoryLoading, setUserHistoryLoading] = useState(false);
   const [reply, setReply] = useState("");           // 坐席回复用户的输入
   const [note, setNote] = useState("");             // 结束处理时的结果备注
   const [acting, setActing] = useState(false);      // accept/close 请求进行中
@@ -123,11 +126,37 @@ function AgentConsoleInner({ auth, onLogout }) {
     return () => clearInterval(timer);
   }, [selected]);
 
+  // 切换/加载用户历史会话侧栏（选中会话变化时关闭重开）
+  async function toggleUserHistory() {
+    if (userHistory) {
+      setUserHistory(null);
+      return;
+    }
+    if (!selected) return;
+    setUserHistoryLoading(true);
+    setUserHistory([]);   // 先开侧栏再拉数据，避免按钮看起来没反应
+    try {
+      const resp = await authFetch(
+        `${API_BASE}/agent/threads/${selected.thread_id}/user_history`,
+        {}, AUTH_ROLE.AGENT, onLogout,
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setUserHistory(data.messages ?? []);
+    } catch {
+      setUserHistory(null);
+      setError("用户历史加载失败");
+    } finally {
+      setUserHistoryLoading(false);
+    }
+  }
+
   async function openThread(thread) {
     const threadId = thread.thread_id;
     // 整包存队列项：user_display_name 供详情标题展示，status 供操作按钮显隐
     setSelected({ thread_id: threadId, status: thread.status, user_display_name: thread.user_display_name });
     setHistory([]);
+    setUserHistory(null);   // 换会话时关闭历史侧栏，避免串会话内容
     try {
       const resp = await authFetch(
         `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.AGENT, onLogout,
@@ -281,6 +310,12 @@ function AgentConsoleInner({ auth, onLogout }) {
                 )}
               </div>
             </div>
+            {/* 工具栏：历史会话入口（随时可看，接入前/中都需要） */}
+            <div className="detail-tools">
+              <button className="ghost-btn" onClick={toggleUserHistory} disabled={userHistoryLoading}>
+                {userHistory ? "收起历史" : "用户历史会话"}
+              </button>
+            </div>
             <div className="msg-list" ref={listRef}>
               {history.length === 0 && <div className="queue-empty">加载中…</div>}
               {history.map((m, i) => (
@@ -296,6 +331,29 @@ function AgentConsoleInner({ auth, onLogout }) {
                 </div>
               ))}
             </div>
+            {/* 用户历史会话侧栏：跨会话的历史消息，只读展示 */}
+            {userHistory !== null && (
+              <div className="user-history-panel">
+                <div className="user-history-head">该用户的全部历史消息</div>
+                <div className="user-history-list">
+                  {userHistory.length === 0 && !userHistoryLoading && (
+                    <div className="queue-empty">暂无历史消息</div>
+                  )}
+                  {userHistory.map((m, i) => (
+                    <div key={i} className="user-history-item">
+                      <div className="user-history-meta">
+                        <span className={`role-tag ${m.role}`}>
+                          {m.role === "user" ? "用户" : m.role === "human" ? "人工" : "智能客服"}
+                        </span>
+                        {m.sender_name && <span className="sender-name">{m.sender_name}</span>}
+                        {m.ts && <span className="msg-ts">{new Date(m.ts).toLocaleString()}</span>}
+                      </div>
+                      <div className="user-history-content">{m.content}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {/* 回复栏：仅接入后（in_service）显示；排队中可看记录但须先接入再回复 */}
             {selected.status === "in_service" && (
             <div className="reply-bar">

@@ -54,6 +54,16 @@ class SessionSummary(BaseModel):
 class SessionListResponse(BaseModel):
     threads: list[SessionSummary]
 
+class AgentUserHistoryResponse(BaseModel):
+    """坐席端查用户历史会话：跨 thread 合并的完整聊天流。
+
+    与 SessionHistoryResponse 区分开：坐席看的是"这个用户以前问过什么"，
+    包含已结束的旧会话，帮助坐席了解上下文而不必让用户重复叙述。
+    """
+
+    user_display_name: str | None = None   # 用户昵称（匿名/已删号回退 None）
+    messages: list[SessionMessage]
+
 class AgentActionRequest(BaseModel):
     """坐席操作请求：接入排队会话 / 结束人工处理。"""
 

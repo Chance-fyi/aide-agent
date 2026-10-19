@@ -27,16 +27,14 @@
 
 ## 验证
 
-```bash
-uv run pytest tests/test_handoff.py tests/test_api.py -q   # 29 passed
-uv run ruff check app tests
-```
+## 追加（step-29.1）：坐席可查用户历史会话
 
-新增用例：
-- `test_in_service_thread_visible_only_to_owner`：队列可见性按接入者过滤
-- `test_close_in_service_rejected_for_other_agent`：非本人关闭被拒
-- `test_in_service_thread_locked_to_owner`（API 级）：B 坐席看不到 A 的在办会话、
-  回复 403、关闭 409，A 本人回复正常
+- 新增 `GET /agent/threads/{id}/user_history`：按会话归属用户跨 thread
+  拉平全部历史消息（复用 `handoff.get_user_messages`）；匿名会话返回空列表。
+  仅要求坐席登录，不限定接入者——接入前也需要看历史决定是否抢单。
+- 前端 AgentConsole：详情面板新增"用户历史会话"侧栏（只读，带角色标签/时间），
+  切换会话时自动关闭。
+- 验证：30 passed（新增 `test_agent_user_history`）。
 
 ## 遗留问题
 
