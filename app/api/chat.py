@@ -150,14 +150,28 @@ async def _invoke_agent(thread_id: str, message: str) -> str:
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+async def chat(
+    req: ChatRequest,
+    user: OptionalUser,
+) -> ChatResponse:
     """核心对话接口：一个问题进，一个回复出。
 
     thread_id 语义：
     - 不传：服务端生成新会话 ID
     - 传入：续接该会话的多轮上下文（Checkpointer 自动恢复历史）
+
+    认证为"可选"：未登录仍可自助问答（匿名会话，坐席端显示为游客）；
+    登录用户则会话绑定到账号，坐席端才能看到"谁在提问"。
     """
     thread_id = req.thread_id or str(uuid.uuid4())
+
+    # 登录用户：把会话归属绑定到账号（已绑定时校验一致性，防串会话）
+    if user is not None:
+        owner = handoff.get_thread_user(thread_id)
+        if owner is not None and owner != user["username"]:
+            # 这是别人的会话，拒绝续写
+            raise HTTPException(status_code=403, detail="无权访问该会话")
+        handoff.set_thread_user(thread_id, user["username"])
 
     # 输入安检（API 层短路）
     if get_settings().input_guardrail:

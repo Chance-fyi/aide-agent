@@ -168,7 +168,7 @@ class AgentState(TypedDict):
 # 路由与守卫
 # ============================================================
 
-def route_input(state: AgentState, config: RunnableConfig) -> str:
+async def route_input(state: AgentState, config: RunnableConfig) -> str:
     """入口路由：三级判断（顺序即优先级）。
 
     1. 会话已在排队/坐席服务中 → 不再打扰用户和 LLM，直接回复对应话术
@@ -187,7 +187,7 @@ def route_input(state: AgentState, config: RunnableConfig) -> str:
         # closed 会话来了新消息：视为新问题回自助，同时复位状态行。
         # 复位失败不影响本轮（closed 不在守卫集合里，agent 照常执行）
         try:
-            handoff.reset_active(thread_id)
+            await handoff.reset_active_fresh(thread_id)
         except Exception:
             logger.exception("复位 closed 会话失败 thread=%s", thread_id)
 

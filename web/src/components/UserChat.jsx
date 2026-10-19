@@ -44,14 +44,14 @@ function UserChatInner({ auth, onLogout }) {
   const [transferred, setTransferred] = useState(false); // 是否已转人工
   const [restored, setRestored] = useState(false);    // 历史恢复是否完成（避免恢复期间闪欢迎页）
   const listRef = useRef(null);                       // 自动滚到底部用
-  const inputRef = useRef(null);                      // 新会话后焦点回输入框
+  const inputRef = useRef(null);                      // 发送完成后焦点回输入框
   const loadingRef = useRef(false);                   // 轮询跳过发送中的请求（闭包里的 loading 会过期）
 
   loadingRef.current = loading;
 
   const onAuthExpired = onLogout;   // Token 失效：清登录态回登录页
 
-  // 挂载时恢复上次会话：有存档且后端还有数据则续接，否则当新会话
+  // 挂载时恢复上次会话：单会话延续模式，有存档且后端有数据则续接
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) {
@@ -148,15 +148,6 @@ function UserChatInner({ auth, onLogout }) {
     }
   }
 
-  function reset() {
-    // "新会话"：清空本地状态与存档，thread_id 置空后端会开新会话
-    setMessages([]);
-    setThreadId(null);
-    setTransferred(false);
-    localStorage.removeItem(STORAGE_KEY);
-    inputRef.current?.focus();
-  }
-
   return (
     <div className="chat-panel">
       <header className="header">
@@ -173,7 +164,6 @@ function UserChatInner({ auth, onLogout }) {
             </span>
           </div>
         </div>
-        <button className="ghost-btn" onClick={reset}>新会话</button>
         {/* 当前登录用户与退出登录：双端都可见，明确"我是谁" */}
         <span className="login-user">{auth.display_name || auth.username}</span>
         <button

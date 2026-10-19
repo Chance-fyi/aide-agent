@@ -25,6 +25,23 @@ logger = logging.getLogger(__name__)
 _lock = asyncio.Lock()
 _pool: AsyncConnectionPool | None = None
 _graph: CompiledStateGraph | None = None
+# Checkpointer 的"就绪信箱"：handoff 的 reset_active_fresh 需要拿到
+# checkpointer 实例清空 Agent 记忆，但它是懒初始化的——用 Future 解耦
+# 初始化时序。Future 延迟到首次访问时创建（模块导入时可能还没有事件循环，
+# Python 3.12+ 在无运行循环时 get_event_loop 会报错）
+_checkpointer_ready: asyncio.Future | None = None
+
+
+def _checkpointer_future() -> asyncio.Future:
+    global _checkpointer_ready
+    if _checkpointer_ready is None:
+        _checkpointer_ready = asyncio.get_running_loop().create_future()
+    return _checkpointer_ready
+
+
+async def get_checkpointer() -> AsyncPostgresSaver:
+    """获取已初始化的 Checkpointer（未就绪则等待初始化完成）。"""
+    return await asyncio.shield(_checkpointer_future())
 
 
 async def get_graph() -> CompiledStateGraph:
@@ -46,6 +63,8 @@ async def get_graph() -> CompiledStateGraph:
                 await _pool.open(wait=True, timeout=10)  # 显式打开并等到至少一个连接就绪
                 _checkpointer = AsyncPostgresSaver(_pool)
                 await _checkpointer.setup()   # 幂等建 Checkpointer 表
+                if not _checkpointer_future().done():
+                    _checkpointer_future().set_result(_checkpointer)
                 handoff.ensure_table()        # 幂等建转接状态表
                 from app.core.users import ensure_table as ensure_user_table
                 ensure_user_table()           # 幂等建用户账号表（登录体系）
