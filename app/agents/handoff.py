@@ -41,12 +41,18 @@ def _get_conn() -> psycopg.Connection:
 
 
 def ensure_table() -> None:
-    """幂等建表 + 幂等加列（step-14 新增 agent_name/resolution）。
+    """幂等建表。
 
-    CREATE TABLE IF NOT EXISTS 不会给已存在的表加新列，
-    存量库必须靠 ALTER TABLE 迁移；ADD COLUMN IF NOT EXISTS 可重复执行。
+    schema 变更时直接 DROP 旧表重建（开发期无历史负担，不做存量迁移）；
+    上生产前再引入正式的迁移机制。
     """
     with _get_conn() as conn:
+        # 开发期：schema 与代码不一致时整表重建，容忍丢数据
+        # （检测方式：尝试访问 user_id 列，失败则重建）
+        try:
+            conn.execute("SELECT user_id FROM conversation_status LIMIT 1")
+        except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
+            conn.execute("DROP TABLE IF EXISTS conversation_status")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS conversation_status (
                 thread_id  TEXT PRIMARY KEY,          -- 会话 ID（与 Checkpointer thread_id 同源）
@@ -54,45 +60,34 @@ def ensure_table() -> None:
                 reason     TEXT,                       -- 转接原因（阈值/关键词/用户诉求）
                 agent_name TEXT,                       -- 接入坐席标识（坐席端后续迭代使用）
                 resolution TEXT,                       -- 坐席处理结果
+                user_id    TEXT,                       -- 会话归属用户（关联 app_user.username；匿名会话为空）
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
-        conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS agent_name TEXT")
-        conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS resolution TEXT")
-        # step-26.2 会话归属改用 user_id 关联 app_user（字符串 username 即主键）：
-        # 用户改名/删号时归属不悬空，展示昵称时 JOIN 得到。
-        # 旧列 user_name 一次性迁移后不再使用（保留列避免破坏性变更）
-        conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS user_id TEXT")
-        # 迁移：只搬还没有 user_id 的行（幂等）
-        conn.execute("""
-            UPDATE conversation_status SET user_id = user_name
-            WHERE user_id IS NULL AND user_name IS NOT NULL
-        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_user ON conversation_status (user_id)")
         # 用户可见的会话记录表：用户/机器人/人工坐席的消息都落在这里。
         # 为什么不用 Checkpointer 当历史源：Checkpointer 是 Agent 执行快照，
         # 坐席回复、纯转达类消息不经过图执行，写不进去；
         # 且跨天恢复、坐席端展示都需要按时间序读纯消息流，独立表查询模型更简单
+        try:
+            conn.execute("SELECT user_id FROM chat_message LIMIT 1")
+        except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
+            conn.execute("DROP TABLE IF EXISTS chat_message")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_message (
                 id         BIGSERIAL PRIMARY KEY,
                 thread_id  TEXT NOT NULL,
                 role       TEXT NOT NULL,              -- user / agent(智能客服) / human(人工坐席)
                 content    TEXT NOT NULL,
+                user_id    TEXT,                       -- user 角色消息的发送者（agent/human 消息为空）
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_message_thread ON chat_message (thread_id, id)"
         )
-        # step-27 消息归属用户：user 角色的消息记录发送者（user_id = app_user.username），
-        # agent/human 消息留空（它们属于会话而非用户）。回填存量数据（幂等）
-        conn.execute("ALTER TABLE chat_message ADD COLUMN IF NOT EXISTS user_id TEXT")
-        conn.execute("""
-            UPDATE chat_message m SET user_id = cs.user_id
-            FROM conversation_status cs
-            WHERE m.thread_id = cs.thread_id AND m.role = 'user' AND m.user_id IS NULL
-        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_message_user ON chat_message (user_id)")
 
 
 def append_message(thread_id: str, role: str, content: str, user_id: str | None = None) -> None:
@@ -284,7 +279,7 @@ def set_thread_user(thread_id: str, username: str) -> None:
 
     为什么用 UPSERT 而非纯 UPDATE：登录用户发首条消息时，
     conversation_status 可能还没有该会话的状态行（状态行只在转接时才 INSERT），
-    纯 UPDATE 会匹配 0 行静默无效 → user_name 永远为 NULL。
+    纯 UPDATE 会匹配 0 行静默无效（首条消息时状态行可能尚未存在）。
     无行则插入 active 状态行，与 get_status 的"无记录视为 active"语义一致；
     已有行则只补归属，不覆盖现有转接状态。
     """
