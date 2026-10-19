@@ -48,12 +48,15 @@ function formatTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
-export function MessageBubble({ message, bubbleClass, withAvatar = true, showTag = true }) {
+export function MessageBubble({ message, bubbleClass, withAvatar = true, showTag = true, showTime }) {
   if (!message.content) return null; // 空消息不渲染（如坐席接入后的无应答轮次）
   const d = roleDisplay(message.role);
   // 人工消息且带坐席昵称：标签显示具体是谁回复的（坐席端视角保持"人工"）
   const isHumanNamed = message.role === ROLE.HUMAN && message.sender_name;
   const time = formatTime(message.ts);
+  // 时间默认跟随角色标签展示；隐藏标签的消息（如用户自己的气泡）
+  // 需单独开 showTime 才能显示发送时间
+  const wantTime = showTime ?? showTag;
   return (
     <>
       {withAvatar && (
@@ -65,8 +68,12 @@ export function MessageBubble({ message, bubbleClass, withAvatar = true, showTag
         {showTag && (
           <span className="role-tag">
             {isHumanNamed ? message.sender_name : d.tag}
-            {time && <time className="msg-time">{time}</time>}
+            {wantTime && time && <time className="msg-time">{time}</time>}
           </span>
+        )}
+        {/* 无标签但要显示时间的消息：时间单独渲染在气泡内右下对齐的小字 */}
+        {!showTag && wantTime && time && (
+          <time className="msg-time msg-time-solo">{time}</time>
         )}
         {message.content}
       </div>

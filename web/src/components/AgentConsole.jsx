@@ -326,7 +326,6 @@ function AgentConsoleInner({ auth, onLogout }) {
                     /* 坐席端视角：客户靠左，智能客服/人工坐席都靠右 */
                     className={`msg-row ${m.role === "user" ? "assistant" : "user"} ${isOldThread ? "old-thread" : ""}`}
                   >
-                    {isOldThread && <div className="old-thread-tag">历史</div>}
                     <MessageBubble
                       message={m}
                       bubbleClass={agentViewBubbleClass(m.role)}

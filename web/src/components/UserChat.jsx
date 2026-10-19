@@ -198,6 +198,7 @@ function UserChatInner({ auth, onLogout }) {
               bubbleClass={m.role === ROLE.USER ? "user" : m.role === ROLE.HUMAN ? "human" : "agent-view"}
               withAvatar={m.role !== ROLE.USER}
               showTag={m.role !== ROLE.USER}
+              showTime={true}   // 用户自己的消息也显示发送时间
             />
           </div>
         ))}

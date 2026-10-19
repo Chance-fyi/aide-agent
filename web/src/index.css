@@ -493,25 +493,17 @@ button:disabled { cursor: not-allowed; }
 /* locked：被其他坐席接走的本地态（仅详情面板出现），中性提示色 */
 .badge.locked { background: #e2e8f0; color: #64748b; }
 
-/* 旧会话消息（历史流里非当前 thread）：置灰 + "历史"小标签。
-   标签用绝对定位：不能当 flex 子元素，否则在靠右的行里会把气泡挤离右边缘 */
-.msg-row { position: relative; }
+/* 旧会话消息（历史流里非当前 thread）：仅置灰区分，不再加标签 */
 .msg-row.old-thread { opacity: 0.55; }
-.old-thread-tag {
-  position: absolute;
-  top: -13px;
-  left: 40px;                 /* 靠左的行（客户消息）：头像右侧 */
+
+/* 无角色标签的消息（如用户自己的气泡）单独显示发送时间：
+   右对齐小字，不占独立行，跟随气泡内容排布 */
+.msg-time-solo {
+  display: block;
+  text-align: right;
   font-size: 10px;
-  color: #94a3b8;
-  border: 1px solid #e2e8f0;
-  border-radius: 4px;
-  padding: 0 5px;
-  line-height: 1.4;
-  pointer-events: none;
-}
-.msg-row.user .old-thread-tag {
-  left: auto;
-  right: 40px;                /* 靠右的行（智能客服/人工）：头像左侧 */
+  margin-top: 2px;
+  opacity: 0.65;
 }
 .badge.closed { background: #f1f5f9; color: var(--text-sub); }
 
