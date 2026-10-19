@@ -267,13 +267,24 @@ def get_thread_user(thread_id: str) -> str | None:
         return None
 
 def set_thread_user(thread_id: str, username: str) -> None:
-    """记录/修正会话归属用户。失败只记日志：归属信息丢失不应打断用户对话。"""
+    """记录/修正会话归属用户（UPSERT）。
+
+    为什么用 UPSERT 而非纯 UPDATE：登录用户发首条消息时，
+    conversation_status 可能还没有该会话的状态行（状态行只在转接时才 INSERT），
+    纯 UPDATE 会匹配 0 行静默无效 → user_name 永远为 NULL。
+    无行则插入 active 状态行，与 get_status 的"无记录视为 active"语义一致；
+    已有行则只补归属，不覆盖现有转接状态。
+    """
     try:
         with _get_conn() as conn:
             conn.execute(
-                "UPDATE conversation_status SET user_name = %s, updated_at = now() "
-                "WHERE thread_id = %s",
-                (thread_id, username),
+                """
+                INSERT INTO conversation_status (thread_id, status, user_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (thread_id)
+                DO UPDATE SET user_name = EXCLUDED.user_name, updated_at = now()
+                """,
+                (thread_id, STATUS_ACTIVE, username),
             )
     except Exception:
         logger.exception("会话归属更新失败 thread=%s user=%s", thread_id, username)

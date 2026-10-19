@@ -56,3 +56,23 @@ closed 后由后端自动重开（上下文清零），无需用户手动干预�
 - `reset_active_fresh` 里 Checkpointer 删除失败时记忆残留（仅日志可查），
   后续可加一个对账巡检
 - 用户端暂无"历史会话列表"UI（单会话延续够用，多会话留待后续排期）
+
+## step-26.1：修复会话归属绑定失效（坐席端一直显示游客）
+
+两层 bug 叠加，逐层排查定位：
+
+1. **SQL 参数顺序反了**：`set_thread_user` 的 UPDATE 语句
+   `SET user_name = %s ... WHERE thread_id = %s`，参数却传
+   `(thread_id, username)`——user_name 被写成 thread_id 值，
+   WHERE 匹配不到行，静默无效
+2. **UPDATE 时状态行尚不存在**：登录用户发首条消息时
+   conversation_status 无该会话状态行（状态行只在转接时才 INSERT），
+   纯 UPDATE 匹配 0 行照样静默无效。修复：改为 UPSERT——
+   无行则插入 active 状态行（与 get_status"无记录视为 active"语义一致），
+   已有行只补归属不覆盖转接状态（用 EXCLUDED.user_name）
+
+排查过程：curl → TestClient → DB 级最小复现，
+最终用"先 set 后 INSERT"的时序脚本实锤第 2 层。
+
+验证：单测（无行 UPSERT / 转接后归属保留）+ 端到端
+（登录 → 发消息 → 查库 user_name = 用户名）通过。
