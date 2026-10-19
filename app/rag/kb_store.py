@@ -27,12 +27,23 @@ def _get_conn() -> psycopg.Connection:
     return psycopg.connect(s.postgres_dsn, autocommit=True)
 
 def ensure_table() -> None:
-    """幂等建表：文档元数据 + 切块内容两张表，path 外键关联。"""
+    """幂等建表：文档元数据 + 切块内容两张表，doc_path 外键关联。
+
+    约定：所有表一律用 BIGSERIAL 代理主键 id（与 app_user/chat_message
+    同一口径），业务列另加唯一约束——path 可变（文件重命名）时其他表
+    的引用不致悬空。schema 与代码不一致时整表重建（开发期无存量负担）。
+    """
     with _get_conn() as conn:
+        try:
+            conn.execute("SELECT id, path, strategy FROM kb_document LIMIT 1")
+        except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
+            conn.execute("DROP TABLE IF EXISTS kb_chunk")
+            conn.execute("DROP TABLE IF EXISTS kb_document")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS kb_document (
-                path       TEXT PRIMARY KEY,   -- 文件路径（相对语料目录，如 returns.md）
-                strategy   TEXT,               -- 切分策略覆盖；NULL = 按后缀默认
+                id         BIGSERIAL PRIMARY KEY,   -- 代理主键：项目统一口径
+                path       TEXT NOT NULL UNIQUE,    -- 文件路径（相对语料目录，如 returns.md）
+                strategy   TEXT,                    -- 切分策略覆盖；NULL = 按后缀默认
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
