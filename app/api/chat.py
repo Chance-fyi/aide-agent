@@ -146,8 +146,8 @@ async def _invoke_agent(thread_id: str, message: str) -> str:
 
     reply = result["messages"][-1]
     # content 可能是非字符串形态（分段 content / 空 tool_calls 消息），
-    # 统一走 .text() 取纯文本；空回复给兜底话术，避免前端渲染出空白气泡
-    text = reply.text() if isinstance(reply, AIMessage) else str(reply.content)
+    # 统一走 .text 取纯文本；空回复给兜底话术，避免前端渲染出空白气泡
+    text = reply.text if isinstance(reply, AIMessage) else str(reply.content)
     if not text.strip():
         logger.warning("chat 生成空回复 thread=%s", thread_id)
         return "抱歉，刚才的回复没有生成成功，请您再试一次。"
@@ -188,21 +188,24 @@ async def chat(
         # 匿名用户：维持旧行为，前端传什么用什么（localStorage 续接）
         thread_id = req.thread_id or str(uuid.uuid4())
 
+    # 匿名用户无归属，user 消息不带 user_id；登录用户统一取账号 ID
+    uid = user["id"] if user else None
+
     # 输入安检（API 层短路）
     if get_settings().input_guardrail:
         category = guardrails.check_message(req.message)
         if category:
-            return _handle_guarded(thread_id, req.message, category, user_id=user["id"] if user else None)
+            return _handle_guarded(thread_id, req.message, category, user_id=uid)
 
     # 已转接会话：用户消息直达人工
     status = _get_thread_status(thread_id)
     if handoff.is_live_status(status):
-        return _handle_live(thread_id, req.message, status, user_id=user["id"] if user else None)
+        return _handle_live(thread_id, req.message, status, user_id=uid)
 
     # 正常自助问答：Agent 生成回复后落记录表（跨天恢复/坐席端查看的统一数据源）
     text = await _invoke_agent(thread_id, req.message)
     # 落库失败只记日志：回复本身已生成，因记录表抖动而报错得不偿失
-    _save_messages(thread_id, (ROLE_USER, req.message), (ROLE_AGENT, text), user_id=user["id"] if user else None)
+    _save_messages(thread_id, (ROLE_USER, req.message), (ROLE_AGENT, text), user_id=uid)
 
     # 转接可能在 Agent 执行中发生（LLM 调了转接工具）：重新查一次状态。
     # 查询失败降级为"未转接"——代价是前端 UI 少一次提示，可接受
@@ -250,13 +253,13 @@ def _messages_from_checkpointer(state) -> list[SessionMessage]:
     return [
         SessionMessage(
             role=ROLE_USER if isinstance(m, HumanMessage) else ROLE_AGENT,
-            content=m.text(),
+            content=m.text,
         )
         for m in state.values["messages"]
         if isinstance(m, (HumanMessage, AIMessage))
         # 过滤掉 tool_calls 中间消息（content 为空的 AIMessage）：
         # 它是 Agent 内部的"工具调用记录"，不是要展示给用户的对话内容
-        and not (isinstance(m, AIMessage) and not m.text().strip())
+        and not (isinstance(m, AIMessage) and not m.text.strip())
     ]
 
 

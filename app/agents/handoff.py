@@ -94,7 +94,7 @@ def ensure_table() -> None:
 
 def append_message(
     thread_id: str, role: str, content: str,
-    user_id: str | None = None, sender_id: str | None = None,
+    user_id: str | None = None, sender_id: int | None = None,
 ) -> None:
     """追加一条用户可见的会话记录。
 
@@ -275,6 +275,18 @@ def reset_active(thread_id: str) -> None:
             "UPDATE conversation_status SET status = %s, updated_at = now() WHERE thread_id = %s",
             (STATUS_ACTIVE, thread_id),
         )
+
+def get_user_display_name(user_id: int) -> str | None:
+    """查用户展示昵称；无此账号/异常返回 None（前端回退"游客"）。"""
+    try:
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT display_name FROM app_user WHERE id = %s", (user_id,)
+            ).fetchone()
+            return row[0] if row else None
+    except Exception:
+        logger.exception("用户昵称查询失败 user_id=%s", user_id)
+        return None
 
 def get_thread_user(thread_id: str) -> int | None:
     """查会话归属用户 ID；无记录/异常返回 None（不阻断对话主链路）。"""

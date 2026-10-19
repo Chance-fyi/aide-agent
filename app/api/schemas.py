@@ -66,9 +66,12 @@ class AgentUserHistoryResponse(BaseModel):
     messages: list[SessionMessage]
 
 class AgentActionRequest(BaseModel):
-    """坐席操作请求：接入排队会话 / 结束人工处理。"""
+    """坐席操作请求：接入排队会话 / 结束人工处理。
 
-    agent_name: str = Field(default="agent", max_length=64, description="坐席标识")
+    坐席身份一律以登录态（Token）为准，请求体不再接受 agent_name，
+    杜绝任意人冒充坐席。
+    """
+
     resolution: str = Field(default="", max_length=500, description="处理结果（close 时使用）")
 
 class AgentReplyRequest(BaseModel):

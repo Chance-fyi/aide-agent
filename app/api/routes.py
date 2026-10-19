@@ -89,13 +89,7 @@ async def user_history(
         return AgentUserHistoryResponse(user_display_name=None, messages=[])
     try:
         rows = handoff.get_user_messages(owner_id)
-        owner_name = None
-        with handoff._get_conn() as conn:
-            row = conn.execute(
-                "SELECT display_name FROM app_user WHERE id = %s", (owner_id,)
-            ).fetchone()
-            if row:
-                owner_name = row[0]
+        owner_name = handoff.get_user_display_name(owner_id)
     except Exception:
         logger.exception("用户历史查询失败 thread=%s", thread_id)
         raise HTTPException(status_code=503, detail="历史查询暂时不可用，请稍后重试") from None

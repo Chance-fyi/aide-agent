@@ -50,7 +50,7 @@ async def get_graph() -> CompiledStateGraph:
     加锁防并发初始化。连接池 open=False + 显式 wait()：
     等 Postgres 真正可用再继续，失败会带明确报错。
     """
-    global _pool, _graph
+    global _pool, _graph, _checkpointer
     if _graph is None:
         async with _lock:
             if _graph is None:  # 双重检查
@@ -63,8 +63,6 @@ async def get_graph() -> CompiledStateGraph:
                 await _pool.open(wait=True, timeout=10)  # 显式打开并等到至少一个连接就绪
                 _checkpointer = AsyncPostgresSaver(_pool)
                 await _checkpointer.setup()   # 幂等建 Checkpointer 表
-                if not _checkpointer_future().done():
-                    _checkpointer_future().set_result(_checkpointer)
                 handoff.ensure_table()        # 幂等建转接状态表
                 from app.core.users import ensure_table as ensure_user_table
                 ensure_user_table()           # 幂等建用户账号表（登录体系）
@@ -75,7 +73,7 @@ async def get_graph() -> CompiledStateGraph:
 
 async def close() -> None:
     """应用关闭时释放连接池。"""
-    global _pool, _graph
+    global _pool, _graph, _checkpointer
     if _pool is not None:
         try:
             await _pool.close()
@@ -84,3 +82,4 @@ async def close() -> None:
             logger.warning("连接池关闭异常", exc_info=True)
     _pool = None
     _graph = None
+    _checkpointer = None

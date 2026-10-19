@@ -61,7 +61,7 @@ def _get_thread_status(thread_id: str, fallback: str) -> str:
 def _last_text_message(messages: list[AnyMessage], msg_type: str) -> AnyMessage | None:
     """从消息列表末尾向前找第一条指定类型且有文本内容的消息；没有则 None。"""
     return next(
-        (m for m in reversed(messages) if m.type == msg_type and m.text().strip()),
+        (m for m in reversed(messages) if m.type == msg_type and m.text.strip()),
         None,
     )
 
