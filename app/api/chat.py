@@ -178,12 +178,12 @@ async def chat(
         # 当前流已 closed（上一次人工服务结束）则开新 thread：
         # 新问题从干净的 Agent 上下文开始，旧 thread 的 Checkpointer
         # 快照与 chat_message 记录都保留，后续排查/审计有据可查
-        thread_id = handoff.get_user_current_thread(user["username"])
+        thread_id = handoff.get_user_current_thread(user["id"])
         if thread_id and handoff.get_status(thread_id) == handoff.STATUS_CLOSED:
             thread_id = None
         if not thread_id:
             thread_id = str(uuid.uuid4())
-        handoff.set_thread_user(thread_id, user["username"])
+        handoff.set_thread_user(thread_id, user["id"])
     else:
         # 匿名用户：维持旧行为，前端传什么用什么（localStorage 续接）
         thread_id = req.thread_id or str(uuid.uuid4())
@@ -192,17 +192,17 @@ async def chat(
     if get_settings().input_guardrail:
         category = guardrails.check_message(req.message)
         if category:
-            return _handle_guarded(thread_id, req.message, category, user_id=user["username"] if user else None)
+            return _handle_guarded(thread_id, req.message, category, user_id=user["id"] if user else None)
 
     # 已转接会话：用户消息直达人工
     status = _get_thread_status(thread_id)
     if handoff.is_live_status(status):
-        return _handle_live(thread_id, req.message, status, user_id=user["username"] if user else None)
+        return _handle_live(thread_id, req.message, status, user_id=user["id"] if user else None)
 
     # 正常自助问答：Agent 生成回复后落记录表（跨天恢复/坐席端查看的统一数据源）
     text = await _invoke_agent(thread_id, req.message)
     # 落库失败只记日志：回复本身已生成，因记录表抖动而报错得不偿失
-    _save_messages(thread_id, (ROLE_USER, req.message), (ROLE_AGENT, text), user_id=user["username"] if user else None)
+    _save_messages(thread_id, (ROLE_USER, req.message), (ROLE_AGENT, text), user_id=user["id"] if user else None)
 
     # 转接可能在 Agent 执行中发生（LLM 调了转接工具）：重新查一次状态。
     # 查询失败降级为"未转接"——代价是前端 UI 少一次提示，可接受
@@ -221,9 +221,9 @@ async def my_history(user: CurrentUser) -> SessionHistoryResponse:
     按时间序），登录后无论换设备还是清 localStorage 都能看到完整聊天流。
     status 取当前活跃 thread 的状态（排队/服务中状态跨设备也正确）。
     """
-    messages = handoff.get_user_messages(user["username"])
+    messages = handoff.get_user_messages(user["id"])
     status = handoff.STATUS_ACTIVE
-    tid = handoff.get_user_current_thread(user["username"])
+    tid = handoff.get_user_current_thread(user["id"])
     if tid:
         status = handoff.get_status(tid)
     return SessionHistoryResponse(
@@ -240,7 +240,7 @@ async def list_sessions(user: CurrentUser) -> SessionListResponse:
     conversation_status.user_id 存会话归属——列表按会话归属查，
     登录后无论换浏览器还是清 localStorage 都能找回全部历史。
     """
-    threads = handoff.list_user_threads(user["username"])
+    threads = handoff.list_user_threads(user["id"])
     return SessionListResponse(threads=[SessionSummary(**t) for t in threads])
 
 def _messages_from_checkpointer(state) -> list[SessionMessage]:
@@ -279,7 +279,7 @@ async def history(
     if (
         user is not None
         and owner is not None
-        and owner != user["username"]
+        and owner != user["id"]
         and user["role"] != "agent"
     ):
         raise HTTPException(status_code=403, detail="无权访问该会话")

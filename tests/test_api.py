@@ -25,24 +25,24 @@ _AGENT_USER = f"test_agent_{uuid.uuid4().hex[:8]}"
 _AGENT_NAME = "坐席小王"
 
 @pytest.fixture(scope="session", autouse=True)
-def _seed_agent_account():
+def _agent_id():
     """会话级建立坐席账号，结束后自动删除：
     pytest 每次运行都生成随机用户名，不清理会持续堆积 test_agent_* 账号。"""
     ensure_table()
-    create_user(_AGENT_USER, "test-password", ROLE_AGENT, _AGENT_NAME)
-    yield
+    user = create_user(_AGENT_USER, "test-password", ROLE_AGENT, _AGENT_NAME)
+    yield user["id"]   # agent_headers 拿主键 id 签 Token
     # 会话结束清理本账号（及其可能产生的会话引用）
     import psycopg
 
     from app.core.config import get_settings
     with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
-        conn.execute("UPDATE conversation_status SET user_id = NULL WHERE user_id = %s", (_AGENT_USER,))
-        conn.execute("DELETE FROM app_user WHERE username = %s", (_AGENT_USER,))
+        conn.execute("UPDATE conversation_status SET user_id = NULL WHERE user_id = %s", (user["id"],))
+        conn.execute("DELETE FROM app_user WHERE id = %s", (user["id"],))
 
 @pytest.fixture
-def agent_headers():
+def agent_headers(_agent_id):
     """坐席接口的认证头：直接用 Token 函数签发（免登录接口依赖）。"""
-    return {"Authorization": f"Bearer {create_token(_AGENT_USER, ROLE_AGENT)}"}
+    return {"Authorization": f"Bearer {create_token(_agent_id, ROLE_AGENT)}"}
 
 
 @pytest.fixture

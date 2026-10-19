@@ -57,10 +57,14 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def create_token(username: str, role: str) -> str:
-    """签发自包含 Token：payload 明文可读（不存敏感信息），签名防篡改。"""
+def create_token(user_id: int, role: str) -> str:
+    """签发自包含 Token：payload 明文可读（不存敏感信息），签名防篡改。
+
+    sub 存 app_user.id（代理主键）而非 username：用户改名后 Token 仍有效，
+    与"其他表用 id 关联用户"的策略一致。
+    """
     payload = {
-        "sub": username,
+        "sub": user_id,
         "role": role,
         "exp": int(time.time()) + TOKEN_TTL_SEC,
     }

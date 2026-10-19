@@ -64,3 +64,16 @@ step-27 改为多 thread 后，补丁失效为"多余且有害"：
   对外字段仍叫 sender_name（昵称语义），屏蔽存储细节；前端零改动
 - routes.reply_thread 改传 sender_id=agent["username"]
 - schema 变更走 DROP 重建；端到端验证：库中存 agent1，接口返回"坐席小王"
+
+## step-28.4：app_user 增加代理主键 id，全链路 id 关联
+
+- app_user 新增 BIGSERIAL id 主键，username 改 UNIQUE（登录名可变更）
+- 关联全面切 id：
+  - conversation_status.user_id / chat_message.user_id / chat_message.sender_id
+    → BIGINT 关联 app_user.id
+  - Token 的 sub 存 user id（改名后 Token 仍有效）；deps 按 id 反查用户
+    （get_user_by_id），账号已删则按未认证处理
+- users.py 返回体统一带 id；auth.py 签 Token 用 user["id"]
+- 好处：改用户名/昵称不悬空、JOIN 稳定、未来支持改名的数据基础
+- schema 三表 DROP 重建，正式账号重置（密码同前）
+- 修复过程中发现的测试 fixture 问题：agent_headers 依赖 _agent_id 主键签 Token

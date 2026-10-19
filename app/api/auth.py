@@ -55,7 +55,7 @@ async def register(body: RegisterRequest):
         logger.exception("注册落库失败 username=%s", body.username)
         raise HTTPException(status_code=503, detail="注册暂时不可用，请稍后重试") from None
     return AuthResponse(
-        token=create_token(user["username"], user["role"]),
+        token=create_token(user["id"], user["role"]),
         **user,
     )
 
@@ -74,7 +74,7 @@ async def login(body: LoginRequest):
         logger.exception("登录查询失败 username=%s", body.username)
         raise HTTPException(status_code=503, detail="登录暂时不可用，请稍后重试") from None
     return AuthResponse(
-        token=create_token(user["username"], user["role"]),
+        token=create_token(user["id"], user["role"]),
         **user,
     )
 

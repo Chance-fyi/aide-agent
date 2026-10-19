@@ -15,7 +15,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.security import ROLE_AGENT, decode_token
-from app.core.users import get_user
+from app.core.users import get_user_by_id
 
 # auto_error=False：没有 Authorization 头时不由库直接抛 403，
 # 交给依赖函数自己决定是"降级为匿名"还是"返回 401"
@@ -31,7 +31,8 @@ def _user_from_credentials(
     payload = decode_token(creds.credentials)
     if payload is None:
         return None
-    return get_user(payload["sub"])
+    # sub 是 app_user.id（代理主键）：查库取完整用户，顺带校验账号仍存在
+    return get_user_by_id(payload["sub"])
 
 
 def get_optional_user(

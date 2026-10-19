@@ -24,7 +24,8 @@ def ensure_table() -> None:
     with _get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS app_user (
-                username      TEXT PRIMARY KEY,
+                id            BIGSERIAL PRIMARY KEY,  -- 代理主键：其他表用它关联（改用户名不悬空）
+                username      TEXT NOT NULL UNIQUE,   -- 登录名（唯一，但可变更）
                 password_hash TEXT NOT NULL,          -- PBKDF2 哈希，绝不存明文
                 role          TEXT NOT NULL,          -- user(用户端) / agent(坐席端)
                 display_name  TEXT NOT NULL,          -- 展示昵称（坐席接入时显示给用户）
@@ -32,6 +33,17 @@ def ensure_table() -> None:
             )
         """)
 
+
+def get_user_by_id(user_id: int) -> dict | None:
+    """按主键查询账号信息（Token 校验后用；账号已删除返回 None 按未认证处理）。"""
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, username, role, display_name FROM app_user WHERE id = %s",
+            (user_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "username": row[1], "role": row[2], "display_name": row[3]}
 
 class AuthError(Exception):
     """认证业务异常：message 为用户可读文案，由路由层翻译成 400/401。"""
@@ -42,40 +54,40 @@ class AuthError(Exception):
 
 
 def create_user(username: str, password: str, role: str, display_name: str | None = None) -> dict:
-    """注册新账号。用户名即主键，冲突直接报业务异常。"""
+    """注册新账号。用户名唯一，冲突直接报业务异常。"""
     if role not in (ROLE_USER, ROLE_AGENT):
         raise AuthError("无效的角色")
     try:
         with _get_conn() as conn:
-            conn.execute(
+            row = conn.execute(
                 "INSERT INTO app_user (username, password_hash, role, display_name) "
-                "VALUES (%s, %s, %s, %s)",
+                "VALUES (%s, %s, %s, %s) RETURNING id",
                 (username, hash_password(password), role, display_name or username),
-            )
+            ).fetchone()
     except psycopg.errors.UniqueViolation:
         raise AuthError("该用户名已被注册") from None
-    return {"username": username, "role": role, "display_name": display_name or username}
+    return {"id": row[0], "username": username, "role": role, "display_name": display_name or username}
 
 
 def authenticate(username: str, password: str) -> dict:
     """登录校验：用户不存在与密码错误返回同一文案，避免泄露账号是否存在。"""
     with _get_conn() as conn:
         row = conn.execute(
-            "SELECT password_hash, role, display_name FROM app_user WHERE username = %s",
+            "SELECT id, password_hash, role, display_name FROM app_user WHERE username = %s",
             (username,),
         ).fetchone()
-    if row is None or not verify_password(password, row[0]):
+    if row is None or not verify_password(password, row[1]):
         raise AuthError("用户名或密码错误")
-    return {"username": username, "role": row[1], "display_name": row[2]}
+    return {"id": row[0], "username": username, "role": row[2], "display_name": row[3]}
 
 
 def get_user(username: str) -> dict | None:
     """按用户名查询账号信息（Token 校验后反查用）。"""
     with _get_conn() as conn:
         row = conn.execute(
-            "SELECT username, role, display_name FROM app_user WHERE username = %s",
+            "SELECT id, username, role, display_name FROM app_user WHERE username = %s",
             (username,),
         ).fetchone()
     if row is None:
         return None
-    return {"username": row[0], "role": row[1], "display_name": row[2]}
+    return {"id": row[0], "username": row[1], "role": row[2], "display_name": row[3]}

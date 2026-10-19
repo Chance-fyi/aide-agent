@@ -60,7 +60,7 @@ def ensure_table() -> None:
                 reason     TEXT,                       -- 转接原因（阈值/关键词/用户诉求）
                 agent_name TEXT,                       -- 接入坐席标识（坐席端后续迭代使用）
                 resolution TEXT,                       -- 坐席处理结果
-                user_id    TEXT,                       -- 会话归属用户（关联 app_user.username；匿名会话为空）
+                user_id    BIGINT,                     -- 会话归属用户（关联 app_user.id；匿名会话为空）
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
@@ -81,7 +81,7 @@ def ensure_table() -> None:
                 role       TEXT NOT NULL,              -- user / agent(智能客服) / human(人工坐席)
                 content    TEXT NOT NULL,
                 user_id    TEXT,                       -- user 角色消息的发送者（agent/human 消息为空）
-                sender_id  TEXT,                       -- human 消息的坐席（关联 app_user.username；昵称 JOIN 得到）
+                sender_id  BIGINT,                     -- human 消息的坐席（关联 app_user.id；昵称 JOIN 得到）
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
@@ -117,7 +117,7 @@ def get_messages(thread_id: str) -> list[dict]:
             """
             SELECT m.role, m.content, m.created_at, u.display_name
             FROM chat_message m
-            LEFT JOIN app_user u ON u.username = m.sender_id
+            LEFT JOIN app_user u ON u.id = m.sender_id
             WHERE m.thread_id = %s
             ORDER BY m.id ASC
             """,
@@ -140,7 +140,7 @@ def list_live_threads() -> list[dict]:
             """
             SELECT cs.thread_id, cs.status, cs.reason, cs.agent_name, cs.updated_at, u.display_name
             FROM conversation_status cs
-            LEFT JOIN app_user u ON u.username = cs.user_id
+            LEFT JOIN app_user u ON u.id = cs.user_id
             WHERE cs.status = ANY(%s)
             ORDER BY updated_at ASC           -- 先转接的排前面，先进先出
             """,
@@ -251,8 +251,8 @@ def reset_active(thread_id: str) -> None:
             (STATUS_ACTIVE, thread_id),
         )
 
-def get_thread_user(thread_id: str) -> str | None:
-    """查会话归属用户；无记录/异常返回 None（不阻断对话主链路）。"""
+def get_thread_user(thread_id: str) -> int | None:
+    """查会话归属用户 ID；无记录/异常返回 None（不阻断对话主链路）。"""
     try:
         with _get_conn() as conn:
             row = conn.execute(
@@ -264,7 +264,7 @@ def get_thread_user(thread_id: str) -> str | None:
         logger.exception("会话归属查询失败 thread=%s", thread_id)
         return None
 
-def get_user_current_thread(username: str) -> str | None:
+def get_user_current_thread(user_id: int) -> str | None:
     """反查用户当前使用的聊天流 thread_id（取最近活跃的那条）。
 
     "一个用户一条聊天记录"语义：无论换设备/清缓存，登录后都能接上
@@ -275,14 +275,14 @@ def get_user_current_thread(username: str) -> str | None:
             row = conn.execute(
                 "SELECT thread_id FROM conversation_status "
                 "WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1",
-                (username,),
+                (user_id,),
             ).fetchone()
             return row[0] if row else None
     except Exception:
-        logger.exception("用户当前会话查询失败 user=%s", username)
+        logger.exception("用户当前会话查询失败 user_id=%s", user_id)
         return None
 
-def set_thread_user(thread_id: str, username: str) -> None:
+def set_thread_user(thread_id: str, user_id: int) -> None:
     """记录/修正会话归属用户（UPSERT）。
 
     为什么用 UPSERT 而非纯 UPDATE：登录用户发首条消息时，
@@ -300,12 +300,12 @@ def set_thread_user(thread_id: str, username: str) -> None:
                 ON CONFLICT (thread_id)
                 DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = now()
                 """,
-                (thread_id, STATUS_ACTIVE, username),
+                (thread_id, STATUS_ACTIVE, user_id),
             )
     except Exception:
-        logger.exception("会话归属更新失败 thread=%s user=%s", thread_id, username)
+        logger.exception("会话归属更新失败 thread=%s user_id=%s", thread_id, user_id)
 
-def get_user_messages(username: str, limit: int = 200) -> list[dict]:
+def get_user_messages(user_id: int, limit: int = 200) -> list[dict]:
     """按用户取全部聊天记录（跨 thread 合并、按时间序）。
 
     "一条聊天记录"的存储现实：用户历史上有多个 thread（每轮人工服务
@@ -318,14 +318,14 @@ def get_user_messages(username: str, limit: int = 200) -> list[dict]:
             """
             SELECT m.thread_id, m.role, m.content, m.created_at, u.display_name
             FROM chat_message m
-            LEFT JOIN app_user u ON u.username = m.sender_id
+            LEFT JOIN app_user u ON u.id = m.sender_id
             WHERE m.thread_id IN (
                 SELECT thread_id FROM conversation_status WHERE user_id = %s
             )
             ORDER BY m.created_at DESC, m.id DESC
             LIMIT %s
             """,
-            (username, limit),
+            (user_id, limit),
         ).fetchall()
     # SQL 倒序取最新的 N 条，返回时转回正序（聊天流从上往下读）
     return [
@@ -336,7 +336,7 @@ def get_user_messages(username: str, limit: int = 200) -> list[dict]:
         for r in reversed(rows)
     ]
 
-def list_user_threads(username: str) -> list[dict]:
+def list_user_threads(user_id: int) -> list[dict]:
     """列出某用户的全部会话（用户端"历史会话"列表数据源）。
 
     会话骨架取 conversation_status（有状态/归属），LEFT JOIN 每会话最后一条
@@ -357,7 +357,7 @@ def list_user_threads(username: str) -> list[dict]:
             WHERE cs.user_id = %s
             ORDER BY COALESCE(lm.created_at, cs.updated_at) DESC
             """,
-            (username,),
+            (user_id,),
         ).fetchall()
     return [
         {
