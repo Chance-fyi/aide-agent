@@ -38,9 +38,22 @@ export function agentViewBubbleClass(role) {
  * @param withAvatar  是否渲染头像（用户看自己的消息通常不需要）
  * @param showTag     是否显示角色标签（自己的消息一般不需要标明身份）
  */
+// 时间展示：今天的消息只显示时分，更早的带日期
+function formatTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
 export function MessageBubble({ message, bubbleClass, withAvatar = true, showTag = true }) {
   if (!message.content) return null; // 空消息不渲染（如坐席接入后的无应答轮次）
   const d = roleDisplay(message.role);
+  // 人工消息且带坐席昵称：标签显示具体是谁回复的（坐席端视角保持"人工"）
+  const isHumanNamed = message.role === ROLE.HUMAN && message.sender_name;
+  const time = formatTime(message.ts);
   return (
     <>
       {withAvatar && (
@@ -49,7 +62,12 @@ export function MessageBubble({ message, bubbleClass, withAvatar = true, showTag
         </span>
       )}
       <div className={`msg ${bubbleClass}`}>
-        {showTag && <span className="role-tag">{d.tag}</span>}
+        {showTag && (
+          <span className="role-tag">
+            {isHumanNamed ? message.sender_name : d.tag}
+            {time && <time className="msg-time">{time}</time>}
+          </span>
+        )}
         {message.content}
       </div>
     </>

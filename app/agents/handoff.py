@@ -81,6 +81,7 @@ def ensure_table() -> None:
                 role       TEXT NOT NULL,              -- user / agent(智能客服) / human(人工坐席)
                 content    TEXT NOT NULL,
                 user_id    TEXT,                       -- user 角色消息的发送者（agent/human 消息为空）
+                sender_name TEXT,                      -- human 消息的坐席昵称（用户端展示"客服小王回复"）
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
@@ -90,17 +91,22 @@ def ensure_table() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_message_user ON chat_message (user_id)")
 
 
-def append_message(thread_id: str, role: str, content: str, user_id: str | None = None) -> None:
+def append_message(
+    thread_id: str, role: str, content: str,
+    user_id: str | None = None, sender_name: str | None = None,
+) -> None:
     """追加一条用户可见的会话记录。
 
     role 取值见 app.api.chat 的 ROLE_* 常量：user / agent(智能客服) / human(人工坐席)。
-    user_id 仅 user 角色消息传入（记录发送者，支持"按用户查消息"）；其他角色留空。
+    user_id 仅 user 角色消息传入（记录发送者，支持"按用户查消息"）；
+    sender_name 仅 human 角色消息传入（坐席昵称，用户端展示"谁回复的"）。
     失败由调用方决定是否降级（记日志不抛出场景居多）。
     """
     with _get_conn() as conn:
         conn.execute(
-            "INSERT INTO chat_message (thread_id, role, content, user_id) VALUES (%s, %s, %s, %s)",
-            (thread_id, role, content, user_id),
+            "INSERT INTO chat_message (thread_id, role, content, user_id, sender_name) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (thread_id, role, content, user_id, sender_name),
         )
 
 
@@ -109,7 +115,7 @@ def get_messages(thread_id: str) -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT role, content, created_at
+            SELECT role, content, created_at, sender_name
             FROM chat_message
             WHERE thread_id = %s
             ORDER BY id ASC
@@ -117,7 +123,8 @@ def get_messages(thread_id: str) -> list[dict]:
             (thread_id,),
         ).fetchall()
     return [
-        {"role": r[0], "content": r[1], "ts": r[2].isoformat()} for r in rows
+        {"role": r[0], "content": r[1], "ts": r[2].isoformat(), "sender_name": r[3]}
+        for r in rows
     ]
 
 
@@ -308,7 +315,7 @@ def get_user_messages(username: str, limit: int = 200) -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT m.thread_id, m.role, m.content, m.created_at
+            SELECT m.thread_id, m.role, m.content, m.created_at, m.sender_name
             FROM chat_message m
             WHERE m.thread_id IN (
                 SELECT thread_id FROM conversation_status WHERE user_id = %s
@@ -320,7 +327,10 @@ def get_user_messages(username: str, limit: int = 200) -> list[dict]:
         ).fetchall()
     # SQL 倒序取最新的 N 条，返回时转回正序（聊天流从上往下读）
     return [
-        {"thread_id": r[0], "role": r[1], "content": r[2], "ts": r[3].isoformat()}
+        {
+            "thread_id": r[0], "role": r[1], "content": r[2],
+            "ts": r[3].isoformat(), "sender_name": r[4],
+        }
         for r in reversed(rows)
     ]
 

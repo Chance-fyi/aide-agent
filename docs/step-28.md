@@ -45,3 +45,13 @@ step-27 改为多 thread 后，补丁失效为"多余且有害"：
 - 旧 schema 表已 DROP 重建，正式账号（user1/user2/agent1/agent2）保留在
   app_user，未受影响
 - ruff 通过；62 passed；端到端验证新 schema 下消息 user_id 直接落值
+
+## step-28.2：消息显示坐席昵称与发送时间
+
+- chat_message 新增 sender_name 列：human 消息落库时写入坐席昵称
+  （routes.reply_thread 从登录态取 agent.display_name）
+- get_user_messages / get_messages 返回 sender_name；SessionMessage 模型同步
+- MessageBubble：human 消息标签显示具体坐席昵称（替代泛化的"人工"），
+  所有带标签的消息显示时间（今天只显示时分，更早带日期 .msg-time）
+- 端到端验证：坐席"坐席小王"回复后，用户端历史里 human 消息
+  sender_name="坐席小王" ✓

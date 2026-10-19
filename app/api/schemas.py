@@ -30,9 +30,10 @@ class ChatResponse(BaseModel):
 
 
 class SessionMessage(BaseModel):
-    role: str                   # user / assistant
+    role: str                   # user / agent / human
     content: str
     ts: str | None = None
+    sender_name: str | None = None   # human 消息的坐席昵称（用户端展示用）
 
 
 class SessionHistoryResponse(BaseModel):

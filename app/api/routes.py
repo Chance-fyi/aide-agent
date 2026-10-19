@@ -93,7 +93,8 @@ async def reply_thread(
     if status != handoff.STATUS_IN_SERVICE:
         raise HTTPException(status_code=409, detail="请先接入该会话再回复")
     try:
-        handoff.append_message(thread_id, ROLE_HUMAN, body.content)
+        # 坐席昵称随消息落库：用户端气泡显示"是谁回复的"
+        handoff.append_message(thread_id, ROLE_HUMAN, body.content, sender_name=agent["display_name"])
     except Exception:
         logger.exception("坐席回复落库失败 thread=%s", thread_id)
         raise HTTPException(status_code=503, detail="回复发送失败，请重试") from None

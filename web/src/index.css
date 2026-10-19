@@ -746,3 +746,12 @@ button:disabled { cursor: not-allowed; }
   background: #fff;
 }
 .queue-agent .ghost-btn:hover { background: var(--accent-light); }
+
+/* 消息标签右侧的时间戳（step-28.2） */
+.msg-time {
+  float: right;
+  margin-left: 10px;
+  opacity: 0.65;
+  font-size: 11px;
+  font-weight: 400;
+}
