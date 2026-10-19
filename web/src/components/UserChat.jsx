@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import {
   API_BASE, AUTH_ROLE, ROLE, POLL_INTERVAL_MS, isLiveStatus,
   getAuth, clearAuth, authFetch, errorMessage,
@@ -45,8 +45,10 @@ function UserChatInner({ auth, onLogout }) {
   const listRef = useRef(null);                       // 自动滚到底部用
   const inputRef = useRef(null);                      // 发送完成后焦点回输入框
   const loadingRef = useRef(false);                   // 轮询跳过发送中的请求（闭包里的 loading 会过期）
+  const transferredRef = useRef(false);               // 发送期间同步读取当前转接状态，控制机器人 typing 显示
 
   loadingRef.current = loading;
+  transferredRef.current = transferred;
 
   const onAuthExpired = onLogout;   // Token 失效：清登录态回登录页
 
@@ -81,7 +83,8 @@ function UserChatInner({ auth, onLogout }) {
         );
         if (!resp.ok) return;
         const data = await resp.json();
-        setMessages(data.messages ?? []);
+        const incoming = data.messages ?? [];
+        setMessages((prev) => incoming.length < prev.length ? prev : incoming);
         setTransferred(isLiveStatus(data.status));
       } catch {
         // 轮询失败静默：下一轮自动重试，不打扰用户
@@ -90,14 +93,11 @@ function UserChatInner({ auth, onLogout }) {
     return () => clearInterval(timer);
   }, []);
 
-  // 消息变化时滚动到底部。只在数量变化时滚：轮询每 4s 返回新数组，
-  // 无条件 scrollTo 会反复打断用户向上翻历史，造成滚动条抖动
-  const prevCountRef = useRef(0);
-  useEffect(() => {
-    if (messages.length === prevCountRef.current) return;
-    prevCountRef.current = messages.length;
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, loading]);
+  // 消息列表始终钉在最新消息，滚动容器 CSS 禁用平滑滚动与浏览器锚定。
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
 
   async function send(textArg) {
     const text = (textArg ?? input).trim();
@@ -137,7 +137,8 @@ function UserChatInner({ auth, onLogout }) {
       ]);
     } finally {
       setLoading(false);
-      inputRef.current?.focus();
+      // preventScroll：聚焦时禁止浏览器把焦点元素滚进视野（可能引发布局跳动）
+      inputRef.current?.focus({ preventScroll: true });
     }
   }
 
@@ -166,16 +167,13 @@ function UserChatInner({ auth, onLogout }) {
         </button>
       </header>
 
-      {/* 转接状态横幅：比只在标题里换文案更醒目，用户不会错过 */}
-      {transferred && (
-        <div className="transfer-banner">
+      <div className="message-area">
+        <div className={`transfer-banner ${transferred ? "visible" : ""}`} aria-hidden={!transferred}>
           <span className="dot pulse" />
           已转接人工，您可以继续补充问题，客服会尽快回复
         </div>
-      )}
-
-      <div className="msg-list" ref={listRef}>
-        {restored && messages.length === 0 && (
+        <div className="msg-list" ref={listRef}>
+          {restored && messages.length === 0 && (
           <div className="welcome">
             {/* SVG 图标替代 emoji：跨平台渲染一致，且可用 token 控制颜色 */}
             <div className="welcome-icon">
@@ -195,7 +193,6 @@ function UserChatInner({ auth, onLogout }) {
         {messages.map((m, i) => (
           <div
             key={i}
-            /* 用户端视角：用户靠右，智能客服/人工客服都靠左 */
             className={`msg-row ${m.role === ROLE.USER ? "user" : "assistant"}`}
           >
             <MessageBubble
@@ -207,12 +204,13 @@ function UserChatInner({ auth, onLogout }) {
             />
           </div>
         ))}
-        {loading && (
+        {loading && !transferred && (
           <div className="msg-row assistant">
             <span className="avatar bot bot2">智</span>
             <div className="msg assistant typing"><i /><i /><i /></div>
           </div>
         )}
+        </div>
       </div>
 
       <footer className="input-bar">

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 import {
   API_BASE, AUTH_ROLE, POLL_INTERVAL_MS, isLiveStatus,
   getAuth, clearAuth, authFetch, errorMessage,
@@ -101,17 +101,14 @@ function AgentConsoleInner({ auth, onLogout }) {
     return () => clearInterval(pollRef.current);
   }, [refreshQueue]);
 
-  // 消息变化时滚动到底部：详情面板默认展示最新消息（滚动条停在最下面）。
-  // 完整历史流（userHistory）和回退的 thread 历史（history）都要监听，
-  // 否则历史流视图加载完成后不会触发滚动，停在顶部看不到最新消息。
-  // 只在消息数量真正变化时才滚：轮询每 4s 都返回新数组（引用不同但内容相同），
-  // 无条件 scrollTo 会反复打断坐席向上翻历史，造成滚动条抖动
-  const prevCountRef = useRef(0);
-  useEffect(() => {
-    const list = (userHistory ?? history);
-    if (list.length === prevCountRef.current) return;
-    prevCountRef.current = list.length;
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  // 只在显示消息数量变化时贴底；acting 等无关状态更新不碰滚动位置
+  const previousVisibleCount = useRef(0);
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    const count = (userHistory ?? history).length;
+    if (!el || count === previousVisibleCount.current) return;
+    previousVisibleCount.current = count;
+    el.scrollTop = el.scrollHeight;
   }, [history, userHistory]);
 
   // 轮询选中会话的消息：用户在等待期间补发的消息要能被坐席看到。
@@ -162,7 +159,7 @@ function AgentConsoleInner({ auth, onLogout }) {
     // 整包存队列项：user_display_name 供详情标题展示，status 供操作按钮显隐
     setSelected({ thread_id: threadId, status: thread.status, user_display_name: thread.user_display_name });
     setHistory([]);
-    setUserHistory(null);   // 换会话时重置历史流，避免串会话内容
+    setUserHistory(null);   // 用户主动切换会话时才清空，避免显示上一单内容
     try {
       const resp = await authFetch(
         `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.AGENT, onLogout,
@@ -225,8 +222,17 @@ function AgentConsoleInner({ auth, onLogout }) {
         alert(errorMessage(data, "回复发送失败，请重试"));
         return;
       }
+      const humanMessage = {
+        role: "human",
+        content: text,
+        ts: new Date().toISOString(),
+        sender_name: auth.display_name || auth.username,
+        thread_id: selected.thread_id,
+      };
       setReply("");
-      await openThread(selected);
+      // 乐观更新当前消息流：不清空/重载整个会话，避免发送后列表闪空再重绘
+      setHistory((prev) => [...prev, humanMessage]);
+      setUserHistory((prev) => prev === null ? null : [...prev, humanMessage]);
     } catch {
       alert("回复发送失败，请检查网络");
     } finally {
@@ -328,8 +334,7 @@ function AgentConsoleInner({ auth, onLogout }) {
                 const isOldThread = userHistory !== null && m.thread_id && m.thread_id !== selected.thread_id;
                 return (
                   <div
-                    key={i}
-                    /* 坐席端视角：客户靠左，智能客服/人工坐席都靠右 */
+                    key={`${m.thread_id ?? selected.thread_id}|${m.ts ?? ""}|${m.role}|${m.content}|${i}`}
                     className={`msg-row ${m.role === "user" ? "assistant" : "user"} ${isOldThread ? "old-thread" : ""}`}
                   >
                     <MessageBubble

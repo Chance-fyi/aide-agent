@@ -150,18 +150,27 @@ button:disabled { cursor: not-allowed; }
 }
 .ghost-btn:hover { background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.6); }
 
-/* 转接横幅：醒目告知用户状态变化 */
+/* 消息区：横幅独立占据固定高度，状态变化不影响滚动视口尺寸 */
+.message-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .transfer-banner {
+  flex: 0 0 42px;
+  min-height: 42px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 20px;
+  padding: 8px 20px;
   background: var(--warning-bg);
   color: var(--warning-text);
   font-size: 13px;
   border-bottom: 1px solid var(--warning-border);
-  flex-shrink: 0;
+  overflow: hidden;
 }
+.transfer-banner:not(.visible) { visibility: hidden; }
 .dot {
   width: 8px;
   height: 8px;
@@ -178,7 +187,10 @@ button:disabled { cursor: not-allowed; }
 /* ---------- 消息列表 ---------- */
 .msg-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none; /* 禁用浏览器自动滚动锚定，避免与聊天贴底逻辑叠加 */
+  scroll-behavior: auto; /* 禁用 smooth，避免每次贴底都滚成动画 */
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -189,14 +201,11 @@ button:disabled { cursor: not-allowed; }
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  /* 消息入场：轻微上浮 + 淡入，提升"活"感但不喧宾夺主 */
-  animation: msg-in 0.25s ease-out;
-}
-@keyframes msg-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  width: 100%;
+  flex: 0 0 auto;
 }
 .msg-row.user { flex-direction: row-reverse; }
+.msg-row .msg { flex: 0 1 auto; }
 
 .welcome {
   margin: auto;
@@ -497,7 +506,7 @@ button:disabled { cursor: not-allowed; }
 .msg-row.old-thread { opacity: 0.55; }
 
 /* 无角色标签的消息（如用户自己的气泡）单独显示发送时间：
-   放在消息上方独立一行，靠右对齐（与气泡同侧） */
+   在气泡内、消息内容上方独立一行（不与内容同行） */
 .msg-time-solo {
   display: block;
   text-align: right;
