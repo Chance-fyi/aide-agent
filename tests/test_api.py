@@ -8,7 +8,6 @@
 agent 路径需要真实 LLM，不进 CI 冒烟（后面评估集迭代覆盖）。
 """
 
-import logging
 import uuid
 
 import httpx
@@ -27,13 +26,18 @@ _AGENT_NAME = "坐席小王"
 
 @pytest.fixture(scope="session", autouse=True)
 def _seed_agent_account():
-    """会话级建立坐席账号：需要真实 Postgres（与 handoff 测试同一前提）。"""
+    """会话级建立坐席账号，结束后自动删除：
+    pytest 每次运行都生成随机用户名，不清理会持续堆积 test_agent_* 账号。"""
     ensure_table()
-    try:
-        create_user(_AGENT_USER, "test-password", ROLE_AGENT, _AGENT_NAME)
-    except Exception:  # noqa: BLE001
-        # 理论上随机用户名不会冲突；万一同名存在，登录可用即可
-        logging.getLogger(__name__).info("坐席测试账号已存在，跳过创建")
+    create_user(_AGENT_USER, "test-password", ROLE_AGENT, _AGENT_NAME)
+    yield
+    # 会话结束清理本账号（及其可能产生的会话引用）
+    import psycopg
+
+    from app.core.config import get_settings
+    with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
+        conn.execute("UPDATE conversation_status SET user_id = NULL WHERE user_id = %s", (_AGENT_USER,))
+        conn.execute("DELETE FROM app_user WHERE username = %s", (_AGENT_USER,))
 
 @pytest.fixture
 def agent_headers():

@@ -89,3 +89,22 @@ closed 后由后端自动重开（上下文清零），无需用户手动干预�
   conversation_status / app_user；默认预览，--apply 才删除。
   联调后执行即可清空消息列表里的测试残留
 - 端到端验证：用户"王小明"发消息 + 转接后，坐席队列显示"王小明"✓
+
+## step-26.3：测试数据清理补全
+
+上一版清理脚本只按 thread_id 前缀匹配，漏掉两类残留：
+1. 联调走真实接口产生的 UUID 会话（不带测试前缀）及其孤儿消息
+   （有消息没状态行：早期版本绑定失效所致）
+2. test_agent_* 坐席账号——pytest 每次运行都动态建随机名坐席，脚本
+   又跳过 agent 角色，持续堆积
+
+修复：
+- **cleanup_test_data.py 增加 `--all` 全量模式**：清空
+  chat_message / conversation_status 全表 + 全部测试账号（含 agent 测试号），
+  只保留正式账号；开发期联调产生的 UUID 会话只能靠全量模式清理，
+  文档明确"生产环境严禁 --all"
+- **test_api.py 的 seed fixture 改为 yield + teardown**：测试结束自动删除
+  本次动态创建的坐席账号，不再依赖手动跑清理脚本兜底
+
+执行结果：243 条消息 / 349 个会话状态 / 9 个 test_agent 账号已清空，
+正式账号（user1 张三、user2 李四、agent1、agent2）保留。
