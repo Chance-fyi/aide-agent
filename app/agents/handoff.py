@@ -85,18 +85,27 @@ def ensure_table() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_message_thread ON chat_message (thread_id, id)"
         )
+        # step-27 消息归属用户：user 角色的消息记录发送者（user_id = app_user.username），
+        # agent/human 消息留空（它们属于会话而非用户）。回填存量数据（幂等）
+        conn.execute("ALTER TABLE chat_message ADD COLUMN IF NOT EXISTS user_id TEXT")
+        conn.execute("""
+            UPDATE chat_message m SET user_id = cs.user_id
+            FROM conversation_status cs
+            WHERE m.thread_id = cs.thread_id AND m.role = 'user' AND m.user_id IS NULL
+        """)
 
 
-def append_message(thread_id: str, role: str, content: str) -> None:
+def append_message(thread_id: str, role: str, content: str, user_id: str | None = None) -> None:
     """追加一条用户可见的会话记录。
 
     role 取值见 app.api.chat 的 ROLE_* 常量：user / agent(智能客服) / human(人工坐席)。
+    user_id 仅 user 角色消息传入（记录发送者，支持"按用户查消息"）；其他角色留空。
     失败由调用方决定是否降级（记日志不抛出场景居多）。
     """
     with _get_conn() as conn:
         conn.execute(
-            "INSERT INTO chat_message (thread_id, role, content) VALUES (%s, %s, %s)",
-            (thread_id, role, content),
+            "INSERT INTO chat_message (thread_id, role, content, user_id) VALUES (%s, %s, %s, %s)",
+            (thread_id, role, content, user_id),
         )
 
 
@@ -274,6 +283,24 @@ def get_thread_user(thread_id: str) -> str | None:
         logger.exception("会话归属查询失败 thread=%s", thread_id)
         return None
 
+def get_user_current_thread(username: str) -> str | None:
+    """反查用户当前使用的聊天流 thread_id（取最近活跃的那条）。
+
+    "一个用户一条聊天记录"语义：无论换设备/清缓存，登录后都能接上
+    同一条流。取 updated_at 最新的一条（close 后再来消息会重置时间）。
+    """
+    try:
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT thread_id FROM conversation_status "
+                "WHERE user_id = %s ORDER BY updated_at DESC LIMIT 1",
+                (username,),
+            ).fetchone()
+            return row[0] if row else None
+    except Exception:
+        logger.exception("用户当前会话查询失败 user=%s", username)
+        return None
+
 def set_thread_user(thread_id: str, username: str) -> None:
     """记录/修正会话归属用户（UPSERT）。
 
@@ -296,6 +323,68 @@ def set_thread_user(thread_id: str, username: str) -> None:
             )
     except Exception:
         logger.exception("会话归属更新失败 thread=%s user=%s", thread_id, username)
+
+def get_user_messages(username: str, limit: int = 200) -> list[dict]:
+    """按用户取全部聊天记录（跨 thread 合并、按时间序）。
+
+    "一条聊天记录"的存储现实：用户历史上有多个 thread（每轮人工服务
+    结束后 Agent 记忆清空开新段），但用户视角是一条流——
+    查询层把所有归属该用户的 thread 的消息拉平合并。
+    只取用户发过的消息所在的 thread（thread 归属即用户，双向一致）。
+    """
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT m.thread_id, m.role, m.content, m.created_at
+            FROM chat_message m
+            WHERE m.thread_id IN (
+                SELECT thread_id FROM conversation_status WHERE user_id = %s
+            )
+            ORDER BY m.created_at DESC, m.id DESC
+            LIMIT %s
+            """,
+            (username, limit),
+        ).fetchall()
+    # SQL 倒序取最新的 N 条，返回时转回正序（聊天流从上往下读）
+    return [
+        {"thread_id": r[0], "role": r[1], "content": r[2], "ts": r[3].isoformat()}
+        for r in reversed(rows)
+    ]
+
+def list_user_threads(username: str) -> list[dict]:
+    """列出某用户的全部会话（用户端"历史会话"列表数据源）。
+
+    会话骨架取 conversation_status（有状态/归属），LEFT JOIN 每会话最后一条
+    消息做预览与排序。无消息记录的会话也展示（如刚转接还没聊的）。
+    """
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT cs.thread_id, cs.status, cs.updated_at,
+                   lm.content, lm.created_at, lm.role
+            FROM conversation_status cs
+            LEFT JOIN LATERAL (
+                SELECT content, created_at, role
+                FROM chat_message m
+                WHERE m.thread_id = cs.thread_id
+                ORDER BY m.id DESC LIMIT 1
+            ) lm ON TRUE
+            WHERE cs.user_id = %s
+            ORDER BY COALESCE(lm.created_at, cs.updated_at) DESC
+            """,
+            (username,),
+        ).fetchall()
+    return [
+        {
+            "thread_id": r[0],
+            "status": r[1],
+            "updated_at": r[2].isoformat(),
+            "last_message": r[3],                      # 最后一条消息预览（可能 None）
+            "last_message_at": r[4].isoformat() if r[4] else None,
+            "last_role": r[5],
+        }
+        for r in rows
+    ]
 
 def sweep_timed_out() -> list[str]:
     """排队超时回退：太久没人接的排队会话回到 active（用户可继续自助问答）。

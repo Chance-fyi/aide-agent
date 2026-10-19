@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import {
-  API_BASE, AUTH_ROLE, ROLE, STORAGE_KEY, POLL_INTERVAL_MS, isLiveStatus,
+  API_BASE, AUTH_ROLE, ROLE, POLL_INTERVAL_MS, isLiveStatus,
   getAuth, clearAuth, authFetch, errorMessage,
 } from "../constants";
 import { MessageBubble } from "./MessageBubble";
@@ -39,7 +39,6 @@ function UserChat() {
 function UserChatInner({ auth, onLogout }) {
   const [messages, setMessages] = useState([]);       // { role: 'user'|'agent'|'human', content }
   const [input, setInput] = useState("");
-  const [threadId, setThreadId] = useState(null);     // 会话 ID（多轮记忆的关键）
   const [loading, setLoading] = useState(false);      // 等待后端回复中
   const [transferred, setTransferred] = useState(false); // 是否已转人工
   const [restored, setRestored] = useState(false);    // 历史恢复是否完成（避免恢复期间闪欢迎页）
@@ -51,27 +50,20 @@ function UserChatInner({ auth, onLogout }) {
 
   const onAuthExpired = onLogout;   // Token 失效：清登录态回登录页
 
-  // 挂载时恢复上次会话：单会话延续模式，有存档且后端有数据则续接
+  // 挂载时恢复聊天记录：直接按账号查（/chat/my/history），
+  // 与设备/localStorage 无关——退出重登、换设备都能找回完整聊天流
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) {
-      setRestored(true);
-      return;
-    }
     (async () => {
       try {
         const resp = await authFetch(
-          `${API_BASE}/chat/${saved}/history`, {}, AUTH_ROLE.USER, onAuthExpired,
+          `${API_BASE}/chat/my/history`, {}, AUTH_ROLE.USER, onAuthExpired,
         );
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        setThreadId(saved);
         setMessages(data.messages ?? []);
-        // 恢复转接状态：排队中/处理中都算"已转接"
         setTransferred(isLiveStatus(data.status));
       } catch {
-        // 会话过期/后端清库：静默清掉存档，按新用户处理
-        localStorage.removeItem(STORAGE_KEY);
+        // 加载失败不阻断使用：按空聊天流处理，下轮轮询会再同步
       } finally {
         setRestored(true);
       }
@@ -81,12 +73,11 @@ function UserChatInner({ auth, onLogout }) {
   // 轮询拉取会话记录：主要为了收到人工坐席的回复。
   // 发送中跳过本轮，避免轮询结果覆盖本地乐观消息
   useEffect(() => {
-    if (!threadId) return;
     const timer = setInterval(async () => {
       if (loadingRef.current) return;
       try {
         const resp = await authFetch(
-          `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.USER, onAuthExpired,
+          `${API_BASE}/chat/my/history`, {}, AUTH_ROLE.USER, onAuthExpired,
         );
         if (!resp.ok) return;
         const data = await resp.json();
@@ -97,7 +88,7 @@ function UserChatInner({ auth, onLogout }) {
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [threadId]);
+  }, []);
 
   // 消息变化时滚动到底部
   useEffect(() => {
@@ -117,10 +108,9 @@ function UserChatInner({ auth, onLogout }) {
       const resp = await authFetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          thread_id: threadId,  // 首轮为 null，后端会生成
-        }),
+        body: JSON.stringify({ message: text }),
+        // thread_id 由服务端按登录账号解析（"一个用户一条聊天记录"），
+        // 前端不再持有/持久化它
       }, AUTH_ROLE.USER, onAuthExpired);
       if (!resp.ok) {
         // 后端 503 等会带 detail 文案，优先展示给用户而非笼统的"网络异常"
@@ -129,8 +119,6 @@ function UserChatInner({ auth, onLogout }) {
       }
       const data = await resp.json();
 
-      setThreadId(data.thread_id);          // 记住会话 ID，后续多轮携带
-      localStorage.setItem(STORAGE_KEY, data.thread_id);  // 跨天恢复的凭据
       setTransferred(data.transferred);     // 转接后切换状态 UI（输入不再禁用）
       // 坐席已接入后后端返回空 message（不再刷机器人应答），前端不渲染空气泡
       if (data.message) {
@@ -156,11 +144,7 @@ function UserChatInner({ auth, onLogout }) {
           <div>
             <h1>舒心购智能客服</h1>
             <span className="subtitle">
-              {transferred
-                ? "人工客服会话中"
-                : threadId
-                  ? `会话 ${threadId.slice(0, 8)}`
-                  : "在线 · 有什么可以帮您？"}
+              {transferred ? "人工客服会话中" : "在线 · 有什么可以帮您？"}
             </span>
           </div>
         </div>
@@ -169,8 +153,7 @@ function UserChatInner({ auth, onLogout }) {
         <button
           className="ghost-btn"
           onClick={() => {
-            clearAuth(AUTH_ROLE.USER);
-            localStorage.removeItem(STORAGE_KEY);
+            clearAuth(AUTH_ROLE.USER);   // 聊天记录在服务端按账号存，退出只清登录态
             onLogout();
           }}
         >

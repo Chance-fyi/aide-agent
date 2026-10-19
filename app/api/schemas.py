@@ -40,6 +40,19 @@ class SessionHistoryResponse(BaseModel):
     status: str                 # active / queued / in_service / closed
     messages: list[SessionMessage]
 
+class SessionSummary(BaseModel):
+    """会话列表项：用户端"历史会话"侧栏用。"""
+
+    thread_id: str
+    status: str
+    updated_at: str
+    last_message: str | None    # 最后一条消息预览
+    last_message_at: str | None
+    last_role: str | None
+
+class SessionListResponse(BaseModel):
+    threads: list[SessionSummary]
+
 class AgentActionRequest(BaseModel):
     """坐席操作请求：接入排队会话 / 结束人工处理。"""
 
