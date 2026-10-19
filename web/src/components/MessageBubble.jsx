@@ -65,15 +65,15 @@ export function MessageBubble({ message, bubbleClass, withAvatar = true, showTag
         </span>
       )}
       <div className={`msg ${bubbleClass}`}>
+        {/* 无标签但要显示时间的消息：时间放消息上方独立一行 */}
+        {!showTag && wantTime && time && (
+          <time className="msg-time msg-time-solo">{time}</time>
+        )}
         {showTag && (
           <span className="role-tag">
             {isHumanNamed ? message.sender_name : d.tag}
             {wantTime && time && <time className="msg-time">{time}</time>}
           </span>
-        )}
-        {/* 无标签但要显示时间的消息：时间单独渲染在气泡内右下对齐的小字 */}
-        {!showTag && wantTime && time && (
-          <time className="msg-time msg-time-solo">{time}</time>
         )}
         {message.content}
       </div>

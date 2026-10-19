@@ -497,12 +497,13 @@ button:disabled { cursor: not-allowed; }
 .msg-row.old-thread { opacity: 0.55; }
 
 /* 无角色标签的消息（如用户自己的气泡）单独显示发送时间：
-   与角色标签里的时间同样式（右上角浮动），视觉统一 */
+   放在消息上方独立一行，靠右对齐（与气泡同侧） */
 .msg-time-solo {
-  float: right;
-  margin-left: 10px;
+  display: block;
+  text-align: right;
   font-size: 11px;
   opacity: 0.65;
+  margin-bottom: 2px;
 }
 .badge.closed { background: #f1f5f9; color: var(--text-sub); }
 
