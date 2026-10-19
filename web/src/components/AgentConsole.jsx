@@ -103,8 +103,14 @@ function AgentConsoleInner({ auth, onLogout }) {
 
   // 消息变化时滚动到底部：详情面板默认展示最新消息（滚动条停在最下面）。
   // 完整历史流（userHistory）和回退的 thread 历史（history）都要监听，
-  // 否则历史流视图加载完成后不会触发滚动，停在顶部看不到最新消息
+  // 否则历史流视图加载完成后不会触发滚动，停在顶部看不到最新消息。
+  // 只在消息数量真正变化时才滚：轮询每 4s 都返回新数组（引用不同但内容相同），
+  // 无条件 scrollTo 会反复打断坐席向上翻历史，造成滚动条抖动
+  const prevCountRef = useRef(0);
   useEffect(() => {
+    const list = (userHistory ?? history);
+    if (list.length === prevCountRef.current) return;
+    prevCountRef.current = list.length;
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [history, userHistory]);
 

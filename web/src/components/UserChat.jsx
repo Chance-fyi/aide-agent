@@ -92,6 +92,12 @@ function UserChatInner({ auth, onLogout }) {
 
   // 消息变化时滚动到底部
   useEffect(() => {
+    // 新消息到达时滚动到底部。只在数量变化时滚：轮询每 4s 返回新数组，
+  // 无条件 scrollTo 会反复打断用户向上翻历史，造成滚动条抖动
+  const prevCountRef = useRef(0);
+  useEffect(() => {
+    if (messages.length === prevCountRef.current) return;
+    prevCountRef.current = messages.length;
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
 
@@ -99,8 +105,9 @@ function UserChatInner({ auth, onLogout }) {
     const text = (textArg ?? input).trim();
     if (!text || loading) return;   // 转人工后仍可发消息，只拦"发送中"
 
-    // 乐观更新：立刻显示用户消息
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
+    // 乐观更新：立刻显示用户消息（ts 用客户端时间，不等后端落库返回——
+    // 否则发送后要等轮询才出现时间，且本地时钟与服务器误差可忽略）
+    setMessages((prev) => [...prev, { role: "user", content: text, ts: new Date().toISOString() }]);
     setInput("");
     setLoading(true);
 
@@ -122,13 +129,13 @@ function UserChatInner({ auth, onLogout }) {
       setTransferred(data.transferred);     // 转接后切换状态 UI（输入不再禁用）
       // 坐席已接入后后端返回空 message（不再刷机器人应答），前端不渲染空气泡
       if (data.message) {
-        setMessages((prev) => [...prev, { role: ROLE.AGENT, content: data.message }]);
+        setMessages((prev) => [...prev, { role: ROLE.AGENT, content: data.message, ts: new Date().toISOString() }]);
       }
     } catch (err) {
       // 网络失败/后端 503：友好提示而非白屏；detail 里是后端给的可操作文案
       setMessages((prev) => [
         ...prev,
-        { role: ROLE.AGENT, content: err.message || "网络异常，请稍后重试。" },
+        { role: ROLE.AGENT, content: err.message || "网络异常，请稍后重试。", ts: new Date().toISOString() },
       ]);
     } finally {
       setLoading(false);
