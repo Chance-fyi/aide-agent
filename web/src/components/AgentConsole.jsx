@@ -23,6 +23,9 @@ const STATUS_LABEL = {
   in_service: "处理中",
   active: "自助中",
   closed: "已结束",
+  // 本地态：会话已从队列消失但不是被自己接入/关闭的（被其他坐席接走）。
+  // 只用于详情面板展示，不出现在队列列表里
+  locked: "其他坐席处理中",
 };
 
 function timeAgo(iso) {
@@ -70,10 +73,18 @@ function AgentConsoleInner({ auth, onLogout }) {
       const data = await resp.json();
       setThreads(data.threads ?? []);
       setError("");
-      // 同步选中会话的最新状态（可能已被其他坐席接入/关闭，多坐席并发场景）
-      setSelected((sel) =>
-        sel ? data.threads.find((t) => t.thread_id === sel.thread_id) ?? { ...sel, status: "closed" } : null
-      );
+      // 同步选中会话的最新状态（多坐席并发场景）：
+      // - 会话已从队列消失：若不是自己刚关闭的，说明被其他坐席接走/关闭，
+      //   标记为 locked 展示"其他坐席处理中"（没有操作按钮与回复栏）
+      // - 会话还在队列里：以队列返回的最新状态为准（按钮显隐跟着变）
+      setSelected((sel) => {
+        if (!sel) return null;
+        const found = data.threads.find((t) => t.thread_id === sel.thread_id);
+        if (found) return { ...sel, ...found };
+        return sel.status === "locked" || sel.status === "closed"
+          ? sel
+          : { ...sel, status: "locked" };
+      });
     } catch {
       // 轮询失败不打断页面，只展示提示，下一轮自动重试
       setError("队列刷新失败，正在重试…");
@@ -114,8 +125,8 @@ function AgentConsoleInner({ auth, onLogout }) {
 
   async function openThread(thread) {
     const threadId = thread.thread_id;
-    // 整包存队列项：user_name 供详情标题展示，status 供操作按钮显隐
-    setSelected({ thread_id: threadId, status: thread.status, user_name: thread.user_name });
+    // 整包存队列项：user_display_name 供详情标题展示，status 供操作按钮显隐
+    setSelected({ thread_id: threadId, status: thread.status, user_display_name: thread.user_display_name });
     setHistory([]);
     try {
       const resp = await authFetch(

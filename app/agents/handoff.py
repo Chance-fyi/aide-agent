@@ -48,9 +48,9 @@ def ensure_table() -> None:
     """
     with _get_conn() as conn:
         # 开发期：schema 与代码不一致时整表重建，容忍丢数据
-        # （检测方式：尝试访问 user_id 列，失败则重建）
+        # （检测方式：尝试访问关键列，缺列/缺表则重建；agent_id 为 step-29 新增的接入锁定列）
         try:
-            conn.execute("SELECT user_id FROM conversation_status LIMIT 1")
+            conn.execute("SELECT user_id, agent_id FROM conversation_status LIMIT 1")
         except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
             conn.execute("DROP TABLE IF EXISTS conversation_status")
         conn.execute("""
@@ -58,7 +58,8 @@ def ensure_table() -> None:
                 thread_id  TEXT PRIMARY KEY,          -- 会话 ID（与 Checkpointer thread_id 同源）
                 status     TEXT NOT NULL DEFAULT 'active',
                 reason     TEXT,                       -- 转接原因（阈值/关键词/用户诉求）
-                agent_name TEXT,                       -- 接入坐席标识（坐席端后续迭代使用）
+                agent_name TEXT,                       -- 接入坐席昵称（展示用）
+                agent_id   BIGINT,                     -- 接入坐席账号 ID（回复/关闭权限校验的唯一依据）
                 resolution TEXT,                       -- 坐席处理结果
                 user_id    BIGINT,                     -- 会话归属用户（关联 app_user.id；匿名会话为空）
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -129,11 +130,13 @@ def get_messages(thread_id: str) -> list[dict]:
     ]
 
 
-def list_live_threads() -> list[dict]:
-    """列出所有待处理/处理中的会话（坐席端队列数据源）。
+def list_live_threads(agent_id: int | None = None) -> list[dict]:
+    """列出待处理/处理中的会话（坐席端队列数据源）。
 
-    只查业务表，不碰 Checkpointer：队列刷新是高频操作，
-    轻量查询优先，消息内容由前端按需再调 /chat/{id}/history 获取。
+    接入即锁定：in_service 会话只有接入者本人能看到，其他坐席
+    队列里不该出现（防止误点进去回复被拒，界面语义也更清晰）；
+    queued 排队会话所有坐席都可见（保持抢单语义）。
+    agent_id 为 None 时不过滤（测试/管理场景用）。
     """
     with _get_conn() as conn:
         rows = conn.execute(
@@ -142,9 +145,11 @@ def list_live_threads() -> list[dict]:
             FROM conversation_status cs
             LEFT JOIN app_user u ON u.id = cs.user_id
             WHERE cs.status = ANY(%s)
+              -- 处理中的会话只归属接入者本人；排队的对所有坐席可见
+              AND (cs.status = %s OR cs.agent_id = %s::bigint OR %s::bigint IS NULL)
             ORDER BY updated_at ASC           -- 先转接的排前面，先进先出
             """,
-            (list(_LIVE_STATUSES),),
+            (list(_LIVE_STATUSES), STATUS_QUEUED, agent_id, agent_id),
         ).fetchall()
     return [
         {
@@ -189,21 +194,22 @@ def mark_pending_human(thread_id: str, reason: str) -> None:
     logger.info("会话已转接(排队): thread=%s reason=%s", thread_id, reason)
 
 
-def agent_accept(thread_id: str, agent_name: str) -> bool:
-    """坐席接入：queued → in_service。
+def agent_accept(thread_id: str, agent_name: str, agent_id: int) -> bool:
+    """坐席接入：queued → in_service，同时锁定到该坐席账号。
 
-    只允许从排队状态接入，防止双坐席重复接入或对 active 会话误操作。
+    只允许从排队状态接入，防止双坐席重复接入或对 active 会话误操作；
+    agent_id 落库是后续权限校验的依据（昵称可改、可重复，账号 ID 不会）。
     返回是否接入成功（False = 状态不是排队中，可能已被接走/已关闭/超时回退）。
     """
     with _get_conn() as conn:
         row = conn.execute(
             """
             UPDATE conversation_status
-            SET status = %s, agent_name = %s, updated_at = now()
+            SET status = %s, agent_name = %s, agent_id = %s, updated_at = now()
             WHERE thread_id = %s AND status = %s
             RETURNING thread_id
             """,
-            (STATUS_IN_SERVICE, agent_name, thread_id, STATUS_QUEUED),
+            (STATUS_IN_SERVICE, agent_name, agent_id, thread_id, STATUS_QUEUED),
         ).fetchone()
     if row:
         logger.info("坐席已接入: thread=%s agent=%s", thread_id, agent_name)
@@ -211,11 +217,25 @@ def agent_accept(thread_id: str, agent_name: str) -> bool:
     return False
 
 
-def agent_close(thread_id: str, resolution: str) -> bool:
+def get_thread_agent_id(thread_id: str) -> int | None:
+    """查会话当前接入坐席的账号 ID；未接入/无记录返回 None。
+
+    供回复/关闭接口做"必须是接入者本人"校验。
+    """
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT agent_id FROM conversation_status WHERE thread_id = %s",
+            (thread_id,),
+        ).fetchone()
+    return row[0] if row else None
+
+def agent_close(thread_id: str, resolution: str, agent_id: int | None = None) -> bool:
     """坐席结束处理：状态置 closed。
 
     close 是"处理完毕"而非"转回自助"：后续新消息视为新问题，会话回 active。
-    排队中也可直接关闭（坐席看到排队工单后直接处理完）。
+    排队中也可直接关闭（坐席看到排队工单后直接处理完）；
+    但服务中的会话只有接入者本人能关（agent_id 传入时校验），
+    防止其他坐席把别人的在办工单关掉。
     """
     with _get_conn() as conn:
         row = conn.execute(
@@ -226,6 +246,8 @@ def agent_close(thread_id: str, resolution: str) -> bool:
                 reason = COALESCE(reason, '') || ' | 结束: ' || %s,
                 updated_at = now()
             WHERE thread_id = %s AND status IN (%s, %s)
+              -- 服务中的会话：仅接入者本人可关闭；排队中：任何坐席可接单即关
+              AND (status = %s OR %s::bigint IS NULL OR agent_id = %s::bigint OR agent_id IS NULL)
             RETURNING thread_id
             """,
             (
@@ -235,6 +257,9 @@ def agent_close(thread_id: str, resolution: str) -> bool:
                 thread_id,
                 STATUS_QUEUED,
                 STATUS_IN_SERVICE,
+                STATUS_QUEUED,
+                agent_id,
+                agent_id,
             ),
         ).fetchone()
     if row:

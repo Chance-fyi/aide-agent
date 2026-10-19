@@ -40,12 +40,14 @@ def test_full_lifecycle():
     assert handoff.get_status(tid) == handoff.STATUS_QUEUED
     assert handoff.is_live_status(handoff.get_status(tid))
 
-    # 2) 坐席接入：排队 → in_service
-    assert handoff.agent_accept(tid, "坐席小王") is True
+    # 2) 坐席接入：排队 → in_service（传入账号 ID，锁定到该坐席）
+    assert handoff.agent_accept(tid, "坐席小王", agent_id=1001) is True
     assert handoff.get_status(tid) == handoff.STATUS_IN_SERVICE
+    # 接入者 ID 已落库，供回复/关闭接口校验
+    assert handoff.get_thread_agent_id(tid) == 1001
 
     # 3) 重复接入应失败（防止双坐席）
-    assert handoff.agent_accept(tid, "坐席小李") is False
+    assert handoff.agent_accept(tid, "坐席小李", agent_id=1002) is False
 
     # 4) 处理结束：→ closed
     assert handoff.agent_close(tid, "已解决退款问题") is True
@@ -55,7 +57,32 @@ def test_full_lifecycle():
 def test_accept_rejects_non_queued():
     """active 会话不能被接入（只能接排队的工单）。"""
     tid = str(uuid.uuid4())
-    assert handoff.agent_accept(tid, "坐席") is False
+    assert handoff.agent_accept(tid, "坐席", agent_id=1) is False
+
+def test_in_service_thread_visible_only_to_owner():
+    """接入即锁定：in_service 会话只出现在接入者本人的队列里，
+    其他坐席看不到，排队中的对所有坐席可见。"""
+    tid = str(uuid.uuid4())
+    handoff.mark_pending_human(tid, reason="队列可见性测试")
+    # 排队中：任何坐席都能看到
+    assert tid in [t["thread_id"] for t in handoff.list_live_threads(agent_id=1)]
+    assert tid in [t["thread_id"] for t in handoff.list_live_threads(agent_id=2)]
+    # 坐席 1 接入后：只有坐席 1 能看到
+    assert handoff.agent_accept(tid, "坐席甲", agent_id=1) is True
+    assert tid in [t["thread_id"] for t in handoff.list_live_threads(agent_id=1)]
+    assert tid not in [t["thread_id"] for t in handoff.list_live_threads(agent_id=2)]
+
+def test_close_in_service_rejected_for_other_agent():
+    """服务中的会话只有接入者本人能关闭，其他坐席关闭应失败。"""
+    tid = str(uuid.uuid4())
+    handoff.mark_pending_human(tid, reason="关闭权限测试")
+    assert handoff.agent_accept(tid, "坐席甲", agent_id=1) is True
+    # 其他坐席不能关别人的在办工单
+    assert handoff.agent_close(tid, "越权关闭", agent_id=2) is False
+    assert handoff.get_status(tid) == handoff.STATUS_IN_SERVICE
+    # 本人可以关
+    assert handoff.agent_close(tid, "本人关闭", agent_id=1) is True
+    assert handoff.get_status(tid) == handoff.STATUS_CLOSED
 
 def test_close_from_queued():
     """坐席看完排队工单直接处理完，允许 queued → closed。"""
@@ -76,7 +103,7 @@ def test_sweep_timed_out_reverts_only_old_queued():
     # 坐席服务中的：不应被回退（坐席在处理，不能自动打断）
     tid_serving = str(uuid.uuid4())
     handoff.mark_pending_human(tid_serving, reason="排队")
-    handoff.agent_accept(tid_serving, "坐席")
+    handoff.agent_accept(tid_serving, "坐席", agent_id=999)
     _set_updated_at(tid_serving, minutes_ago=10_000)
 
     swept = handoff.sweep_timed_out()

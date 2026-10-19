@@ -23,6 +23,9 @@ from app.main import app
 # 本测试会话专用的坐席账号：随机用户名避免多次跑测试撞唯一键
 _AGENT_USER = f"test_agent_{uuid.uuid4().hex[:8]}"
 _AGENT_NAME = "坐席小王"
+# 第二个坐席：验证"接入即锁定"（非本人的在办会话不能回复/关闭/接入）
+_AGENT2_USER = f"test_agent_{uuid.uuid4().hex[:8]}"
+_AGENT2_NAME = "坐席小李"
 
 @pytest.fixture(scope="session", autouse=True)
 def _agent_id():
@@ -30,19 +33,32 @@ def _agent_id():
     pytest 每次运行都生成随机用户名，不清理会持续堆积 test_agent_* 账号。"""
     ensure_table()
     user = create_user(_AGENT_USER, "test-password", ROLE_AGENT, _AGENT_NAME)
+    user2 = create_user(_AGENT2_USER, "test-password", ROLE_AGENT, _AGENT2_NAME)
     yield user["id"]   # agent_headers 拿主键 id 签 Token
     # 会话结束清理本账号（及其可能产生的会话引用）
     import psycopg
 
     from app.core.config import get_settings
     with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
-        conn.execute("UPDATE conversation_status SET user_id = NULL WHERE user_id = %s", (user["id"],))
-        conn.execute("DELETE FROM app_user WHERE id = %s", (user["id"],))
+        for uid in (user["id"], user2["id"]):
+            conn.execute("UPDATE conversation_status SET user_id = NULL WHERE user_id = %s", (uid,))
+            conn.execute("DELETE FROM app_user WHERE id = %s", (uid,))
 
 @pytest.fixture
 def agent_headers(_agent_id):
     """坐席接口的认证头：直接用 Token 函数签发（免登录接口依赖）。"""
     return {"Authorization": f"Bearer {create_token(_agent_id, ROLE_AGENT)}"}
+
+@pytest.fixture
+def agent2_headers(_agent_id):
+    """第二个坐席的认证头：验证接入锁定与越权拒绝。"""
+    # _agent_id fixture yield 的是 user1 的 id；user2 的 id 需要重新查
+    import psycopg
+
+    from app.core.config import get_settings
+    with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
+        row = conn.execute("SELECT id FROM app_user WHERE username = %s", (_AGENT2_USER,)).fetchone()
+    return {"Authorization": f"Bearer {create_token(row[0], ROLE_AGENT)}"}
 
 
 @pytest.fixture
@@ -122,6 +138,38 @@ async def test_agent_accept_conflict(client, agent_headers):
         f"/agent/threads/{uuid.uuid4()}/accept", headers=agent_headers, json={}
     )
     assert resp.status_code == 409
+
+async def test_in_service_thread_locked_to_owner(client, agent_headers, agent2_headers):
+    """接入即锁定：坐席 A 接入后，坐席 B 不能回复/关闭，队列里也看不到。"""
+    # 触发关键词转接拿到排队会话
+    r = await client.post("/chat", json={"message": "转人工"})
+    tid = r.json()["thread_id"]
+
+    # 坐席 A 接入
+    a = await client.post(f"/agent/threads/{tid}/accept", headers=agent_headers, json={})
+    assert a.status_code == 200
+
+    # 坐席 B 队列里不应出现该会话（in_service 只对本人可见）
+    q = await client.get("/agent/threads", headers=agent2_headers)
+    assert tid not in [t["thread_id"] for t in q.json()["threads"]]
+
+    # 坐席 B 回复被拒：403（身份不对）而非 409
+    r2 = await client.post(
+        f"/agent/threads/{tid}/reply", headers=agent2_headers, json={"content": "我来搭把手"}
+    )
+    assert r2.status_code == 403
+
+    # 坐席 B 关闭也被拒：409
+    r3 = await client.post(
+        f"/agent/threads/{tid}/close", headers=agent2_headers, json={"resolution": "越权关闭"}
+    )
+    assert r3.status_code == 409
+
+    # 坐席 A 本人回复正常
+    r4 = await client.post(
+        f"/agent/threads/{tid}/reply", headers=agent_headers, json={"content": "您好，我是接入坐席"}
+    )
+    assert r4.status_code == 200
 
 async def test_agent_close_conflict(client, agent_headers):
     """不存在/非待处理会话不可关闭：409。"""

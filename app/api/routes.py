@@ -35,9 +35,13 @@ agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
 @agent_router.get("/threads")
 async def list_threads(agent: AgentUser):
-    """坐席端队列：所有排队中/处理中的会话，按转接时间先后排序。"""
+    """坐席端队列：按转接时间先后排序。
+
+    接入即锁定：排队中的工单所有人可见（抢单），
+    已接入（in_service）的只出现在接入者本人的队列里。
+    """
     try:
-        return {"threads": handoff.list_live_threads()}
+        return {"threads": handoff.list_live_threads(agent_id=agent["id"])}
     except Exception:
         logger.exception("坐席端队列查询失败")
         raise HTTPException(status_code=503, detail="队列查询暂时不可用，请稍后重试") from None
@@ -54,8 +58,8 @@ async def accept_thread(
     对坐席端来说是同一个含义——"工单不在队列里了，请刷新"。
     """
     body = body or AgentActionRequest()
-    # 坐席身份以登录态为准（展示昵称优先），请求体里的 agent_name 仅作兼容忽略
-    if not handoff.agent_accept(thread_id, agent["display_name"]):
+    # 坐席身份以登录态为准；接入时把账号 ID 锁进会话，后续回复/关闭都以此校验
+    if not handoff.agent_accept(thread_id, agent["display_name"], agent["id"]):
         raise HTTPException(
             status_code=409,
             detail="该会话不在排队中（可能已被接入、超时回退或不存在）",
@@ -68,10 +72,13 @@ async def close_thread(
     thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
     body: AgentActionRequest | None = None,
 ):
-    """坐席结束处理：→ closed；用户下次发消息视为新问题回自助。"""
+    """坐席结束处理：→ closed；用户下次发消息视为新问题回自助。
+
+    服务中的会话只有接入者本人能关，其他坐席关别人的在办工单会被拒（409）。
+    """
     body = body or AgentActionRequest()
-    if not handoff.agent_close(thread_id, body.resolution or "处理完成"):
-        raise HTTPException(status_code=409, detail="该会话不处于待处理状态")
+    if not handoff.agent_close(thread_id, body.resolution or "处理完成", agent_id=agent["id"]):
+        raise HTTPException(status_code=409, detail="该会话不处于待处理状态，或已由其他坐席接入")
     return {"thread_id": thread_id, "status": handoff.STATUS_CLOSED}
 
 @agent_router.post("/threads/{thread_id}/reply")
@@ -82,9 +89,10 @@ async def reply_thread(
 ):
     """坐席回复消息：写入会话记录表，用户端轮询拉取展示。
 
-    只允许在处理中（in_service）状态回复：
+    只允许接入者本人在处理中（in_service）状态下回复：
     - queued（未接入）不能回复：接入是占位动作（防多坐席抢单 + 状态推进），
       未接入就能回复会让接入形同虚设
+    - 非本人的在办会话不能回复：接入即锁定，其他坐席只能看不能插手
     - active 会话没有人工介入的场景；closed 回复与新问题回自助语义冲突
     """
     if body is None:
@@ -92,6 +100,10 @@ async def reply_thread(
     status = handoff.get_status(thread_id)
     if status != handoff.STATUS_IN_SERVICE:
         raise HTTPException(status_code=409, detail="请先接入该会话再回复")
+    # 接入即锁定：不是接入者本人的话，即使知道 thread_id 也不能回复。
+    # 403 而非 409：会话存在且在服务中，是"身份不对"而非"状态不对"
+    if handoff.get_thread_agent_id(thread_id) != agent["id"]:
+        raise HTTPException(status_code=403, detail="该会话已由其他坐席接入")
     try:
         # 坐席昵称随消息落库：用户端气泡显示"是谁回复的"
         handoff.append_message(thread_id, ROLE_HUMAN, body.content, sender_id=agent["id"])

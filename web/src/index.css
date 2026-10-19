@@ -490,6 +490,8 @@ button:disabled { cursor: not-allowed; }
 }
 .badge.queued { background: var(--warning-bg); color: var(--warning-text); }
 .badge.in_service { background: var(--accent-light); color: var(--accent); }
+/* locked：被其他坐席接走的本地态（仅详情面板出现），中性提示色 */
+.badge.locked { background: #e2e8f0; color: #64748b; }
 .badge.closed { background: #f1f5f9; color: var(--text-sub); }
 
 .detail-panel {
