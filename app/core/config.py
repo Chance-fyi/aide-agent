@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     # 知识库检索别名：调用方永远只认别名，版本切换时别名原子改指向
     kb_alias: str = "kb_chunks"
     # 集合 schema 版本号：切分逻辑/表结构变化时手动 +1，触发新版本集合
-    # v2：新增 parent_content 字段（父子检索）
-    kb_schema_version: int = 2
+    # v3：父块迁到 Postgres（父块不入 Milvus，改存 chunk_id 引用回查）
+    kb_schema_version: int = 3
     # embedding 向量维度：换 embedding 模型时必须同步改（bge-small-zh=512，bge-base-zh=768）
     embedding_dim: int = 512
     # 知识库切分策略：header（按标题）/ paragraph（按段落聚合）/ fixed（固定窗口）。

@@ -20,11 +20,13 @@
 
 import hashlib
 import logging
+from pathlib import Path
 
 from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
 from pymilvus.exceptions import MilvusException
 
 from app.core.config import get_settings
+from app.rag import kb_store
 from app.rag.embedder import embed_query, embed_texts
 
 logger = logging.getLogger(__name__)
@@ -69,8 +71,9 @@ def ensure_collection(client: MilvusClient, name: str) -> None:
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=s.embedding_dim),
             # 正文：检索命中后要返回给 LLM/前端
             FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=2048),
-            # 父块：子块所属小节全文（父子检索的返回单元，超长小节时与 content 相同）
-            FieldSchema(name="parent_content", dtype=DataType.VARCHAR, max_length=2048),
+            # Postgres kb_chunk 表的主键引用：父块不存 Milvus（与小节正文大量
+            # 重复、浪费且难同步），检索命中后凭此 id 回查 Postgres 取父块
+            FieldSchema(name="chunk_id", dtype=DataType.INT64),
             # 元数据：溯源与展示用。VARCHAR 必须声明 max_length
             FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="h1", dtype=DataType.VARCHAR, max_length=128),
@@ -128,16 +131,17 @@ def rebuild_index(kb_dir: str) -> int:
     """蓝绿全量重建：staging 集合构建 → 冒烟测试 → 切别名 → 清理旧版本。
 
     流程（检索可用性全程不受影响，直到最后一步原子切换）：
-      1. 读语料、向量化
-      2. 建 staging 集合并写入（命名 <版本集合名>_building）
-      3. 冒烟测试：预设查询命中且分数达标
-      4. 切别名指向新集合，重命名去掉 _building 后缀
-      5. 清理其余旧版本集合
-    任一步失败：删 staging、抛 RuntimeError，旧版本原样在线。
+      1. 读语料：逐文件按「kb_document 覆盖策略 > 后缀默认」切块
+      2. Postgres 事务内写入文档元数据与切块（拿到 chunk_id），
+         同事务内建 staging 集合并写入 Milvus、冒烟测试——
+         Milvus 失败则 Postgres 一起回滚，两侧永远一致
+      3. 切别名指向新集合，重命名去掉 _building 后缀
+      4. 清理其余旧版本集合
+    任一步失败：删 staging、事务回滚，旧版本原样在线。
 
     返回插入的块数。
     """
-    from app.rag.splitter import load_and_split_all
+    from app.rag.splitter import _default_strategy, split_file
 
     s = get_settings()
     client = _get_client()
@@ -149,31 +153,49 @@ def rebuild_index(kb_dir: str) -> int:
     if client.has_collection(staging):
         client.drop_collection(staging)
 
-    chunks = load_and_split_all(kb_dir)
-    if not chunks:
+    # 策略解析（事务外完成）：按文件覆盖 > 后缀默认；日志留痕实际用的策略
+    overrides = kb_store.get_strategies()
+    per_file: list[tuple[str, str, list]] = []
+    all_chunks = []
+    for f in sorted(Path(kb_dir).iterdir()):
+        if not f.is_file():
+            continue
+        strategy = overrides.get(f.name) or _default_strategy(f.suffix.lower())
+        chunks = split_file(f, strategy)
+        if chunks:
+            logger.info("切块: %s strategy=%s chunks=%d", f.name, strategy, len(chunks))
+        all_chunks.extend(chunks)
+        per_file.append((f.name, strategy, chunks))
+    if not all_chunks:
         raise RuntimeError("知识库语料为空，拒绝重建（请检查语料目录）")
 
     # 批量向量化（一次调用比逐条快很多，BGE 内部会分批跑）
-    vectors = embed_texts([c.content for c in chunks])
-    rows = [
-        {
-            "embedding": vec,
-            "content": c.content,
-            "parent_content": c.parent_content[:2000],  # schema 上限 2048，防御性截断
-            "source": c.source,
-            "h1": c.h1,
-            "h2": c.h2,
-        }
-        for c, vec in zip(chunks, vectors, strict=True)
-    ]
+    vectors = embed_texts([c.content for c in all_chunks])
 
     try:
         ensure_collection(client, staging)
-        client.insert(collection_name=staging, data=rows)
-        # flush：把 growing segment 落盘为 sealed segment。
-        # 不 flush 的话统计与检索可能看不到数据（Milvus 最终一致性），必须显式调用
-        client.flush(staging)
-        _smoke_test(client, staging)
+        # Postgres 与 Milvus 绑在同一事务：chunk_id 先在 Postgres 生成，
+        # Milvus 行只存引用；任一侧失败整体回滚，避免两侧不一致
+        with kb_store._get_conn() as conn, conn.transaction():
+            doc_chunk_ids = kb_store.replace_chunks_transaction(conn, per_file)
+            rows = []
+            idx = 0
+            for doc_path, chunks in ((p, c) for p, _, c in per_file):
+                for c, chunk_id in zip(chunks, doc_chunk_ids[doc_path], strict=True):
+                    rows.append({
+                        "embedding": vectors[idx],
+                        "content": c.content,
+                        "chunk_id": chunk_id,
+                        "source": c.source,
+                        "h1": c.h1,
+                        "h2": c.h2,
+                    })
+                    idx += 1
+            client.insert(collection_name=staging, data=rows)
+            # flush：把 growing segment 落盘为 sealed segment。
+            # 不 flush 的话统计与检索可能看不到数据（Milvus 最终一致性），必须显式调用
+            client.flush(staging)
+            _smoke_test(client, staging)
     except Exception as exc:
         # 蓝绿核心承诺：新版本有任何问题，旧版本继续服务
         client.drop_collection(staging)
@@ -205,6 +227,18 @@ def rebuild_index(kb_dir: str) -> int:
     logger.info("知识库蓝绿重建完成: %s (%d 块)", target, len(rows))
     return len(rows)
 
+def _attach_parents(hits: list[dict]) -> list[dict]:
+    """批量回查父块，拼回检索结果（父子检索的 Postgres 半场）。
+
+    chunk_id 查不到时回退用子块正文当父块：只在 Milvus/Postgres 版本
+    短暂不一致（如重建事务已提交但别名未切）时发生，降级优于报错。
+    """
+    parents = kb_store.get_parents([h["chunk_id"] for h in hits])
+    for h in hits:
+        h["parent_content"] = parents.get(h["chunk_id"]) or h["content"]
+    # chunk_id 是纯实现细节，不对外暴露
+    return [{k: v for k, v in h.items() if k != "chunk_id"} for h in hits]
+
 def search(
     query: str,
     top_k: int | None = None,
@@ -235,7 +269,7 @@ def search(
         collection_name=resolved,
         data=[embed_query(query)],
         limit=top_k,
-        output_fields=["content", "parent_content", "source", "h1", "h2"],
+        output_fields=["content", "chunk_id", "source", "h1", "h2"],
         # 归一化向量 + IP 度量下，score 就是余弦相似度
         search_params={"metric_type": "IP"},
     )
@@ -245,12 +279,13 @@ def search(
         {
             "score": float(hit["distance"]),
             "content": hit["entity"]["content"],
-            "parent_content": hit["entity"]["parent_content"],
+            "chunk_id": hit["entity"]["chunk_id"],
             "source": hit["entity"]["source"],
             "h1": hit["entity"]["h1"],
             "h2": hit["entity"]["h2"],
         }
         for hit in hits
     ]
-    # 低分过滤：放在返回前统一做，调用方无需各自判断
-    return [h for h in out if h["score"] >= threshold]
+    # 低分过滤放在父块回查前：被过滤的命中不值得再查一次 Postgres
+    out = [h for h in out if h["score"] >= threshold]
+    return _attach_parents(out)

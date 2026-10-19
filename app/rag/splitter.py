@@ -184,15 +184,27 @@ _LOADERS = {
     ".pdf": _load_pdf,
 }
 
-def load_and_split_all(kb_dir: str, strategy: str | None = None) -> list[Chunk]:
-    """读取知识库目录下所有受支持格式的文件并切块（strategy 语义同 split_markdown）。"""
-    if strategy is None:
-        strategy = get_settings().kb_split_strategy
+def load_and_split_all(
+    kb_dir: str,
+    strategies: dict[str, str] | None = None,
+    force: str | None = None,
+) -> list[Chunk]:
+    """读取知识库目录下所有受支持格式的文件并切块。
+
+    切分策略按文件独立选择（不同文档结构不同，全局统一效果差），
+    优先级：force（对比工具强制统一）> strategies（kb_document 表的覆盖）
+    > 后缀默认（.md → header，其余 → paragraph，md 天然有标题结构，
+    纯文本格式没有）。
+    """
+    if force is not None and force not in _STRATEGIES:
+        raise ValueError(f"未知切分策略: {force}，可选: {sorted(_STRATEGIES)}")
+    strategies = strategies or {}
 
     all_chunks: list[Chunk] = []
     for f in sorted(Path(kb_dir).iterdir()):
         if not f.is_file():
             continue
+        strategy = force or strategies.get(f.name) or _default_strategy(f.suffix.lower())
         if f.suffix.lower() == ".md":
             all_chunks.extend(split_markdown(f.read_text(encoding="utf-8"), source=f.name, strategy=strategy))
             continue
@@ -200,5 +212,33 @@ def load_and_split_all(kb_dir: str, strategy: str | None = None) -> list[Chunk]:
         if loader is None:
             logger.debug("跳过不支持的文件格式: %s", f.name)
             continue
-        all_chunks.extend(loader(f))
+        # 纯文本格式只有一种切法（段落聚合），loader 不接受策略参数；
+        # 但 force=fixed 时也尊重配置（对照实验覆盖所有文件）
+        if strategy == "fixed" and f.suffix.lower() != ".md":
+            all_chunks.extend(split_markdown(f.read_text(encoding="utf-8"), source=f.name, strategy="fixed"))
+        else:
+            all_chunks.extend(loader(f))
     return all_chunks
+
+def split_file(path: Path, strategy: str) -> list[Chunk]:
+    """按指定策略切分单个文件（重建流程逐文件调用的入口）。
+
+    与 load_and_split_all 共用加载器注册表；策略合法性在调用前校验。
+    """
+    if strategy not in _STRATEGIES:
+        raise ValueError(f"未知切分策略: {strategy}，可选: {sorted(_STRATEGIES)}")
+    suffix = path.suffix.lower()
+    if suffix == ".md":
+        return split_markdown(path.read_text(encoding="utf-8"), source=path.name, strategy=strategy)
+    loader = _LOADERS.get(suffix)
+    if loader is None:
+        logger.debug("跳过不支持的文件格式: %s", path.name)
+        return []
+    if strategy == "fixed":
+        # 纯文本格式没有标题结构，fixed 走“不识别结构”的通用路径
+        return split_markdown(path.read_text(encoding="utf-8"), source=path.name, strategy="fixed")
+    return loader(path)
+
+def _default_strategy(suffix: str) -> str:
+    """后缀 → 默认策略：结构化 md 按标题切，无标题格式按段落聚合。"""
+    return "header" if suffix == ".md" else "paragraph"

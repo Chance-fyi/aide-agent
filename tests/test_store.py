@@ -27,9 +27,9 @@ def require_collection():
             "store.rebuild_index('data/knowledge_base') 或 POST /debug/kb/rebuild"
         )
     fields = {f["name"] for f in client.describe_collection(resolved)["fields"]}
-    if "parent_content" not in fields:
+    if "chunk_id" not in fields:
         pytest.fail(
-            f"集合 {resolved} 是旧 schema（缺 parent_content 字段），"
+            f"集合 {resolved} 是旧 schema（缺 chunk_id 字段），"
             "请手动升级：bump KB_SCHEMA_VERSION 后 POST /debug/kb/rebuild"
         )
 

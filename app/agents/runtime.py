@@ -66,6 +66,8 @@ async def get_graph() -> CompiledStateGraph:
                 handoff.ensure_table()        # 幂等建转接状态表
                 from app.core.users import ensure_table as ensure_user_table
                 ensure_user_table()           # 幂等建用户账号表（登录体系）
+                from app.rag import kb_store
+                kb_store.ensure_table()       # 幂等建知识库文档/切块表（父块存储）
                 _graph = build_graph_with_memory(_checkpointer)
                 logger.info("Agent 图已初始化（AsyncPostgresSaver）")
     return _graph
