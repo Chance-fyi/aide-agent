@@ -21,9 +21,17 @@ def _ensure_and_cleanup():
     with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
         conn.execute("DELETE FROM kb_document WHERE path LIKE 'test_%'")
 
-def _fake_chunks(n: int = 2) -> list[Chunk]:
+def _fake_chunks(n: int = 2, parent_key_of=None) -> list[Chunk]:
+    """构造假切块：parent_key_of(i) 决定第 i 块归属哪个父块（默认各自独立）。"""
     return [
-        Chunk(content=f"子块{i}", source="test_a.md", h1="标题", h2="", parent_content=f"父块{i}全文")
+        Chunk(
+            content=f"子块{i}",
+            source="test_a.md",
+            h1="标题",
+            h2="",
+            parent_content=f"父块{(parent_key_of or (lambda x: x))(i)}全文",
+            parent_key=(parent_key_of or (lambda x: x))(i),
+        )
         for i in range(n)
     ]
 
@@ -51,7 +59,7 @@ def test_replace_chunks_and_get_parents():
 
     parents = kb_store.get_parents(ids["test_a.md"])
     assert len(parents) == 3
-    assert all(p.startswith("父块") for p in parents.values())
+    assert all(p["parent_content"].startswith("父块") for p in parents.values())
     # 查不存在的 id：返回空 dict（调用方回退用子块正文）
     assert kb_store.get_parents([10**9]) == {}
 
@@ -69,6 +77,26 @@ def test_replace_is_full_refresh():
     # 旧 id 已不存在
     assert kb_store.get_parents(first["test_a.md"]) == {}
     assert len(kb_store.get_parents(second["test_a.md"])) == 1
+
+def test_sibling_chunks_share_one_parent():
+    """同一小节的多个子块只存一份父块：靠 parent_key 判定，不比正文。
+
+    这正是拆分父块表的目的：3 个子块共享 1 条 kb_parent，
+    且能通过 parent_id 直接判定"同父"，无需比较文本。
+    """
+    import psycopg
+
+    from app.core.config import get_settings
+    with psycopg.connect(get_settings().postgres_dsn) as conn, conn.transaction():
+        ids = kb_store.replace_chunks_transaction(
+            conn, [("test_a.md", "header", _fake_chunks(3, parent_key_of=lambda _: 0))]
+        )
+    parents = kb_store.get_parents(ids["test_a.md"])
+    assert len(parents) == 3
+    # 三个子块指向同一条父块记录
+    assert len({p["parent_id"] for p in parents.values()}) == 1
+    assert len({p["parent_content"] for p in parents.values()}) == 1
+    assert kb_store.stats()["parents"] == 1
 
 def test_stats():
     kb_store.stats()  # 不抛错即正常

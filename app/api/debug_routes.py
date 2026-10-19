@@ -56,7 +56,15 @@ def _memory_search(force: str | None, q: str, top_k: int) -> list[dict]:
         reverse=True,
     )
     return [
-        {"score": round(score, 4), "source": c.source, "h1": c.h1, "h2": c.h2, "content": c.content}
+        {
+            "score": round(score, 4),
+            "source": c.source,
+            "h1": c.h1,
+            "h2": c.h2,
+            "content": c.content,
+            # 与生产链路同口径：parent_key 即“同一父块”的判定依据
+            "parent_id": c.parent_key,
+        }
         for score, c in scored[:top_k]
     ]
 

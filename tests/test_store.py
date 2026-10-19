@@ -51,9 +51,9 @@ def test_search_scores_are_sorted():
 
 
 def test_search_result_schema():
-    """检索结果包含完整字段（content/parent_content/source/h1/h2/score）。"""
+    """检索结果包含完整字段（content/parent_content/parent_id/source/h1/h2/score）。"""
     hit = store.search("会员积分", top_k=1)[0]
-    assert set(hit.keys()) == {"score", "content", "parent_content", "source", "h1", "h2"}
+    assert set(hit.keys()) == {"score", "content", "parent_content", "parent_id", "source", "h1", "h2"}
     assert isinstance(hit["score"], float)
     assert hit["content"]
     assert hit["parent_content"], "父子检索：父块不应为空"

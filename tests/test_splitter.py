@@ -76,6 +76,16 @@ def test_overlong_section_self_parent():
     md = f"# 政策\n\n## 细则\n\n{body}"
     chunks = split_markdown(md, source="test.md")
     assert all(c.parent_content == c.content for c in chunks)
+    # 自为父块的各子块 parent_key 必须互不相同，否则落库会错误合并父块
+    assert len({c.parent_key for c in chunks}) == len(chunks) > 1
+
+def test_siblings_share_parent_key():
+    """普通小节切出多个子块时，parent_key 相同（落库只存一份父块）。"""
+    body = "退货说明。" * 120  # 600 字，小于父块上限，会切成多块
+    chunks = split_markdown(f"# 政策\n\n## 退货\n\n{body}", source="t.md")
+    assert len(chunks) > 1
+    assert len({c.parent_key for c in chunks}) == 1
+    assert len({c.parent_content for c in chunks}) == 1
 
 def test_txt_loader(tmp_path):
     """txt：空行分段聚合为小节，元数据 h1=文件名。"""

@@ -35,6 +35,7 @@ def test_search_kb_normal_hits_include_source(monkeypatch):
             "score": 0.82,
             "content": "自签收之日起 7 天内可申请无理由退货。",
             "parent_content": "## 退货条件\n\n自签收之日起 7 天内可申请无理由退货。定制类商品除外。",
+            "parent_id": 1,
             "source": "returns.md",
             "h1": "退货政策",
             "h2": "退货条件",

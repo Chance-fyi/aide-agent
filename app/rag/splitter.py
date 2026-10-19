@@ -45,6 +45,14 @@ class Chunk:
     h1: str               # 所属一级标题，如 "退货政策"
     h2: str               # 所属二级标题，可能为空
     parent_content: str   # 所属小节全文；超长小节的子块自为父块
+    # 父块身份标识：同一小节切出的子块共享同一值，落库时据此只存一份父块。
+    # 为什么不用文本比较判定"是否同一父块"：正文相同不等于同一小节
+    # （不同章节可能出现完全一样的段落），且长文本比较/哈希成本高、
+    # 落库时还得逐条比对去重。切分器是唯一知道小节边界的地方，
+    # 在这里打标最可靠。
+    # 普通小节为小节序号（int）；超长小节子块自为父块，用 (小节序号, 块序号)
+    # 保证各块 key 互不相同，否则落库会把内容不同的父块错误合并成一条。
+    parent_key: int | tuple[int, int]
 
 def _make_fallback() -> RecursiveCharacterTextSplitter:
     """兜底切分器：只处理超长文本。"""
@@ -53,15 +61,18 @@ def _make_fallback() -> RecursiveCharacterTextSplitter:
         chunk_overlap=_OVERLAP_CHARS,
     )
 
-def _chunks_from_section(content: str, source: str, h1: str, h2: str) -> list[Chunk]:
+def _chunks_from_section(
+    content: str, source: str, h1: str, h2: str, parent_key: int
+) -> list[Chunk]:
     """把一个"小节"切成父子结构块。
 
     parent = 小节全文（≤1500字）；超长小节子块自为父块。
     md 与 txt/docx/pdf 的小节概念在此统一。
+    同一小节切出的所有子块共享 parent_key——落库时据此只存一份父块。
     """
     parent = content if len(content) <= _PARENT_MAX_CHARS else ""
     chunks: list[Chunk] = []
-    for piece in _make_fallback().split_text(content):
+    for i, piece in enumerate(_make_fallback().split_text(content)):
         chunks.append(
             Chunk(
                 content=piece,
@@ -70,6 +81,8 @@ def _chunks_from_section(content: str, source: str, h1: str, h2: str) -> list[Ch
                 h2=h2,
                 # 父块缺失（超长小节）时自我兜底：检索返回至少有完整可用文本
                 parent_content=parent or piece,
+                # 超长小节每块自为父块，key 必须各不相同
+                parent_key=parent_key if parent else (parent_key, i),
             )
         )
     return chunks
@@ -89,7 +102,7 @@ def split_markdown(text: str, source: str, strategy: str | None = None) -> list[
         raise ValueError(f"未知切分策略: {strategy}，可选: {sorted(_STRATEGIES)}")
 
     if strategy == "fixed":
-        # 不识别结构：固定窗口滑切，每块自为父块（对照基准）
+        # 不识别结构：固定窗口滑切，每块自为父块（对照基准），故各自独立 key
         return [
             Chunk(
                 content=piece,
@@ -97,8 +110,9 @@ def split_markdown(text: str, source: str, strategy: str | None = None) -> list[
                 h1=source,
                 h2="",
                 parent_content=piece,
+                parent_key=i,
             )
-            for piece in _make_fallback().split_text(text.strip())
+            for i, piece in enumerate(_make_fallback().split_text(text.strip()))
             if piece.strip()
         ]
 
@@ -113,12 +127,16 @@ def split_markdown(text: str, source: str, strategy: str | None = None) -> list[
     sections = header_splitter.split_text(text)
 
     chunks: list[Chunk] = []
+    parent_key = 0
     for sec in sections:
         meta = sec.metadata  # {"h1": ..., "h2": ...}
         content = sec.page_content.strip()
         if not content:
             continue
-        chunks.extend(_chunks_from_section(content, source, meta.get("h1", ""), meta.get("h2", "")))
+        chunks.extend(
+            _chunks_from_section(content, source, meta.get("h1", ""), meta.get("h2", ""), parent_key)
+        )
+        parent_key += 1
     return chunks
 
 # 可选切分策略（step-17）：策略选择难以凭直觉判断，
@@ -135,13 +153,15 @@ def _split_plain_text(text: str, source: str) -> list[Chunk]:
     chunks: list[Chunk] = []
     section: list[str] = []
     section_len = 0
+    parent_key = 0
 
     def flush() -> None:
-        nonlocal section, section_len
+        nonlocal section, section_len, parent_key
         if not section:
             return
         content = "\n\n".join(section)
-        chunks.extend(_chunks_from_section(content, source, h1=source, h2=""))
+        chunks.extend(_chunks_from_section(content, source, h1=source, h2="", parent_key=parent_key))
+        parent_key += 1
         section, section_len = [], 0
 
     for para in paragraphs:

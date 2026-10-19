@@ -230,14 +230,27 @@ def rebuild_index(kb_dir: str) -> int:
 def _attach_parents(hits: list[dict]) -> list[dict]:
     """批量回查父块，拼回检索结果（父子检索的 Postgres 半场）。
 
+    一次 JOIN 取齐父块正文与标题元数据；parent_id 一并返回，供调用方
+    做「多子块同父」的去重（比比较正文可靠）。
     chunk_id 查不到时回退用子块正文当父块：只在 Milvus/Postgres 版本
     短暂不一致（如重建事务已提交但别名未切）时发生，降级优于报错。
     """
     parents = kb_store.get_parents([h["chunk_id"] for h in hits])
+    out = []
     for h in hits:
-        h["parent_content"] = parents.get(h["chunk_id"]) or h["content"]
+        p = parents.get(h["chunk_id"])
+        out.append({
+            "score": h["score"],
+            "content": h["content"],
+            # 父块来自 Postgres；查不到时自为父块，保证下游有可用上下文
+            "parent_content": p["parent_content"] if p else h["content"],
+            "parent_id": p["parent_id"] if p else h["chunk_id"],
+            "source": h["source"],
+            "h1": h["h1"],
+            "h2": h["h2"],
+        })
     # chunk_id 是纯实现细节，不对外暴露
-    return [{k: v for k, v in h.items() if k != "chunk_id"} for h in hits]
+    return out
 
 def search(
     query: str,

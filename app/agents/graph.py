@@ -100,12 +100,14 @@ def search_kb(query: str) -> str:
 
     # 父子检索（small-to-big）：用短子块检索保证"找得准"，
     # 用长父块喂 LLM 保证"答得全"。多个子块命中同一小节时去重，
-    # 避免同一政策的不同片段重复占用上下文
-    seen_parents: set[tuple] = set()
+    # 避免同一政策的不同片段重复占用上下文。
+    # 去重依据 parent_id（父块主键）而不是正文文本：同文本不一定是
+    # 同一小节，而 parent_id 是切分器分配的真实归属
+    seen_parents: set = set()
     parts: list[str] = []
     for h in hits:
         parent = h["parent_content"]
-        key = (h["source"], h["h1"], h["h2"], parent[:64])
+        key = h.get("parent_id") or (h["source"], h["h1"], h["h2"], parent[:64])
         if key in seen_parents:
             continue
         seen_parents.add(key)

@@ -13,12 +13,26 @@
 | 存储 | 内容 | 理由 |
 |---|---|---|
 | Postgres `kb_document` | 文件路径、切分策略覆盖 | 文档管理元数据，关系库擅长 |
-| Postgres `kb_chunk` | 子块、**父块全文**、h1/h2，`doc_path` 外键 CASCADE | 父块与小节正文大量重复，放 Milvus 浪费且难同步 |
+| Postgres `kb_parent` | **父块（小节）正文一份**、h1/h2 | 一个小节通常切出多个子块，父块独立成表避免重复存 N 份 |
+| Postgres `kb_chunk` | 子块正文 + `parent_id` 外键 | 子块只存自身正文，靠外键判"是否同父"，不比较文本 |
 | Milvus（schema **v3**） | embedding、content、`chunk_id` 引用、h1/h2 | 只做向量检索 |
+
+### 父块与子块的归属判定
+
+切分器在切块时就知道小节边界，因此给每个 `Chunk` 打 `parent_key` 标记
+（普通小节为小节序号；超长小节子块自为父块，用 `(小节序号, 块序号)` 保证唯一）。
+落库时同一 `parent_key` 只插一条 `kb_parent`。
+
+**为什么不在 `kb_chunk` 里存 `parent_content` 再靠文本比较去重**：
+- 一个小节切 N 块就重复存 N 份父块正文
+- 正文相同不等于同一小节（不同章节可能有完全相同的段落），比较不可靠且昂贵
+- 父块正文变更时只影响 `kb_parent`，子块行不受影响
 
 ### 检索链路（父子检索两段式）
 
-`store.search`：Milvus 向量召回（带 chunk_id）→ 低分过滤 → `_attach_parents` 按 chunk_id **批量主键回查 Postgres** 取父块。回查是 top_k 级点查，毫秒级；chunk_id 查不到时回退用子块正文当父块（防御重建切换窗口的不一致）。
+`store.search`：Milvus 向量召回（带 chunk_id）→ 低分过滤 → `_attach_parents` 按 chunk_id **一次 JOIN 批量回查** `kb_chunk → kb_parent`，取父块正文与标题。回查是 top_k 级点查，毫秒级；chunk_id 查不到时回退用子块正文当父块（防御重建切换窗口的不一致）。
+
+结果里额外返回 `parent_id`：`search_kb` 用它做「多子块命中同一小节」的去重（比比较正文可靠）。
 
 ### 按文件切分策略
 

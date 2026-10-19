@@ -5,13 +5,20 @@
 - Postgres：存文件路径、切分策略、父块全文——父子检索的"大文本"与
   文档管理元数据放关系库，检索命中后按 chunk_id 回查父块
 
-为什么父块不放 Milvus：父块是小节全文（最长 1500 字），与子块内容大量
-重复，存两份既浪费内存又要在重建时维护一致性；按主键回查 Postgres
-是毫秒级操作，代价可忽略。
+表结构（三层，均以 BIGSERIAL 代理主键 id 为口径）：
 
-按文件配置切分策略：不同文档结构不同（md 有标题、pdf 是纯文本流），
-全局统一策略效果差。策略存 kb_document 表（持久化，重建时生效），
-无记录的文件按后缀选默认策略。
+    kb_document (文档)          kb_parent (父块/小节)        kb_chunk (子块)
+    id, path, strategy   ──1:N──> id, doc_path, content,  ──1:N──> id, parent_id,
+                                   h1, h2                          content
+
+为什么父块单独成表，而不是在 kb_chunk 里存一份 parent_content：
+- 一个小节通常切成多个子块，父块正文会被重复存 N 份（语料大时浪费明显）
+- "哪些子块共享同一父块"靠文本比较判定既不可靠（不同章节可能有完全
+  相同的段落）又昂贵；有了 parent_id 就是一次等值比较
+- 父块正文变更（改语料重切）只影响父块表，子块行数不变
+
+为什么父块不放 Milvus：父块不参与向量检索，只作为上下文返回；
+关系库主键点查是毫秒级，而放进 Milvus 会为同一小节重复存 N 份向量字段。
 """
 
 import logging
@@ -27,18 +34,20 @@ def _get_conn() -> psycopg.Connection:
     return psycopg.connect(s.postgres_dsn, autocommit=True)
 
 def ensure_table() -> None:
-    """幂等建表：文档元数据 + 切块内容两张表，doc_path 外键关联。
+    """幂等建表：文档 / 父块 / 子块三张表，逐级外键 CASCADE。
 
-    约定：所有表一律用 BIGSERIAL 代理主键 id（与 app_user/chat_message
-    同一口径），业务列另加唯一约束——path 可变（文件重命名）时其他表
-    的引用不致悬空。schema 与代码不一致时整表重建（开发期无存量负担）。
+    开发期约定：schema 与代码不一致时整表重建（无存量迁移负担）。
     """
     with _get_conn() as conn:
         try:
             conn.execute("SELECT id, path, strategy FROM kb_document LIMIT 1")
+            conn.execute("SELECT id, parent_id FROM kb_chunk LIMIT 1")
         except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
+            # 顺序与依赖相反：先删子表再删父表
             conn.execute("DROP TABLE IF EXISTS kb_chunk")
+            conn.execute("DROP TABLE IF EXISTS kb_parent")
             conn.execute("DROP TABLE IF EXISTS kb_document")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS kb_document (
                 id         BIGSERIAL PRIMARY KEY,   -- 代理主键：项目统一口径
@@ -47,16 +56,25 @@ def ensure_table() -> None:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        # 父块 = 一个小节：同小节的子块共享这一行（父块正文只存一份）
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS kb_chunk (
-                id             BIGSERIAL PRIMARY KEY,
-                doc_path       TEXT NOT NULL REFERENCES kb_document(path) ON DELETE CASCADE,
-                content        TEXT NOT NULL,   -- 子块（检索单元）
-                parent_content TEXT NOT NULL,   -- 父块（返回给 LLM 的小节全文）
-                h1             TEXT NOT NULL DEFAULT '',
-                h2             TEXT NOT NULL DEFAULT ''
+            CREATE TABLE IF NOT EXISTS kb_parent (
+                id       BIGSERIAL PRIMARY KEY,
+                doc_path TEXT NOT NULL REFERENCES kb_document(path) ON DELETE CASCADE,
+                content  TEXT NOT NULL,             -- 小节全文（父子检索的返回单元）
+                h1       TEXT NOT NULL DEFAULT '',
+                h2       TEXT NOT NULL DEFAULT ''
             )
         """)
+        # 子块 = 检索单元：只存自身正文 + 指向父块的外键，不重复存父块正文
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS kb_chunk (
+                id        BIGSERIAL PRIMARY KEY,
+                parent_id BIGINT NOT NULL REFERENCES kb_parent(id) ON DELETE CASCADE,
+                content   TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_chunk_parent ON kb_chunk (parent_id)")
 
 # ---- 切分策略管理 ----
 
@@ -77,7 +95,7 @@ def set_strategy(path: str, strategy: str | None) -> None:
         )
 
 def get_strategies() -> dict[str, str]:
-    """读全部策略覆盖（重建时逐文件查的口径，一次拉全量避免 N 次查询）。"""
+    """读全部策略覆盖（重建时一次拉全量，避免逐文件 N 次查询）。"""
     with _get_conn() as conn:
         rows = conn.execute(
             "SELECT path, strategy FROM kb_document WHERE strategy IS NOT NULL"
@@ -92,52 +110,81 @@ def _all_strategies() -> set[str]:
 # ---- 切块读写（重建流程用）----
 
 def replace_chunks_transaction(conn: psycopg.Connection, files: list[tuple[str, str, list]]) -> dict:
-    """在调用方的事务里全量替换切块，返回 doc_path → chunk_id 列表的映射。
+    """在调用方的事务里全量替换切块，返回 doc_path → chunk_id 列表。
 
     事务由调用方（store.rebuild_index）开启：Postgres 写入与 Milvus 构建
     绑定在同一事务里，Milvus 构建失败时 Postgres 一起回滚，两侧永远一致。
-    files 元素为 (doc_path, strategy, chunks)；chunks 为 splitter.Chunk 列表。
+
+    files 元素为 (doc_path, strategy, chunks)。
+    父块去重依据是 Chunk.parent_key（切分器分配的"文件内小节序号"），
+    不比较正文文本——同一 parent_key 的子块共用一条 kb_parent 记录。
     """
-    result: dict = {}
     conn.execute("DELETE FROM kb_chunk")
+    conn.execute("DELETE FROM kb_parent")
     conn.execute("DELETE FROM kb_document")
+
+    result: dict[str, list[int]] = {}
     for doc_path, strategy, chunks in files:
         conn.execute(
             "INSERT INTO kb_document (path, strategy) VALUES (%s, %s)",
             (doc_path, strategy),
         )
-        ids: list[int] = []
+        # parent_key → kb_parent.id：同一小节的子块只插一次父块
+        parent_ids: dict = {}
+        chunk_ids: list[int] = []
         for c in chunks:
-            row = conn.execute(
-                """
-                INSERT INTO kb_chunk (doc_path, content, parent_content, h1, h2)
-                VALUES (%s, %s, %s, %s, %s) RETURNING id
-                """,
-                (doc_path, c.content, c.parent_content, c.h1, c.h2),
-            ).fetchone()
-            ids.append(row[0])
-        result[doc_path] = ids
+            parent_id = parent_ids.get(c.parent_key)
+            if parent_id is None:
+                parent_id = conn.execute(
+                    """
+                    INSERT INTO kb_parent (doc_path, content, h1, h2)
+                    VALUES (%s, %s, %s, %s) RETURNING id
+                    """,
+                    (doc_path, c.parent_content, c.h1, c.h2),
+                ).fetchone()[0]
+                parent_ids[c.parent_key] = parent_id
+            chunk_id = conn.execute(
+                "INSERT INTO kb_chunk (parent_id, content) VALUES (%s, %s) RETURNING id",
+                (parent_id, c.content),
+            ).fetchone()[0]
+            chunk_ids.append(chunk_id)
+        result[doc_path] = chunk_ids
     return result
 
-def get_parents(chunk_ids: list[int]) -> dict[int, str]:
-    """按 Milvus 返回的 chunk_id 批量回查父块全文。
+def get_parents(chunk_ids: list[int]) -> dict[int, dict]:
+    """按 Milvus 返回的 chunk_id 批量回查父块（含标题元数据）。
 
-    检索命中（通常 top_k ≤ 10）后的主键点查，毫秒级。
-    返回 {chunk_id: parent_content}；查不到的 id 不在结果里，
+    返回 {chunk_id: {"parent_id", "parent_content", "source", "h1", "h2"}}。
+    一次 JOIN 取齐，避免每命中一条查两次库。查不到的 id 不在结果里，
     调用方回退用子块正文当父块（防御 Milvus/Postgres 版本短暂不一致）。
     """
     if not chunk_ids:
         return {}
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, parent_content FROM kb_chunk WHERE id = ANY(%s)",
+            """
+            SELECT c.id, p.id, p.content, p.doc_path, p.h1, p.h2
+            FROM kb_chunk c
+            JOIN kb_parent p ON p.id = c.parent_id
+            WHERE c.id = ANY(%s)
+            """,
             (chunk_ids,),
         ).fetchall()
-    return {r[0]: r[1] for r in rows}
+    return {
+        r[0]: {
+            "parent_id": r[1],
+            "parent_content": r[2],
+            "source": r[3],
+            "h1": r[4],
+            "h2": r[5],
+        }
+        for r in rows
+    }
 
 def stats() -> dict:
     """知识库 Postgres 侧统计（调试接口用）。"""
     with _get_conn() as conn:
         docs = conn.execute("SELECT count(*) FROM kb_document").fetchone()[0]
+        parents = conn.execute("SELECT count(*) FROM kb_parent").fetchone()[0]
         chunks = conn.execute("SELECT count(*) FROM kb_chunk").fetchone()[0]
-    return {"documents": docs, "chunks": chunks}
+    return {"documents": docs, "parents": parents, "chunks": chunks}
