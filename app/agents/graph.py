@@ -184,10 +184,11 @@ async def route_input(state: AgentState, config: RunnableConfig) -> str:
         return "transfer"
 
     if status == handoff.STATUS_CLOSED:
-        # closed 会话来了新消息：视为新问题回自助，同时复位状态行。
-        # 复位失败不影响本轮（closed 不在守卫集合里，agent 照常执行）
+        # closed 会话来了新消息：复位状态行（step-27 起登录用户的新消息
+        # 会被 /chat 分配新 thread，本分支只剩匿名用户会走到——
+        # 匿名会话仍复用 thread，需复位以便后续状态判断）
         try:
-            await handoff.reset_active_fresh(thread_id)
+            handoff.reset_active(thread_id)
         except Exception:
             logger.exception("复位 closed 会话失败 thread=%s", thread_id)
 

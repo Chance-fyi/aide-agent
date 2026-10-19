@@ -248,28 +248,6 @@ def reset_active(thread_id: str) -> None:
             (STATUS_ACTIVE, thread_id),
         )
 
-async def reset_active_fresh(thread_id: str) -> None:
-    """closed 会话重开：状态复位 + 清空 Agent 对话记忆。
-
-    "新会话"的语义边界：
-    - Agent 上下文（Checkpointer）清空：新问题不被旧对话污染，
-      不会把上一单的订单号/情绪带进新一轮
-    - chat_message 记录表只追加不删除：客服回看仍能看到该会话的
-      全部历史消息（用户诉求"客服可以看到以前的消息"）
-    - Checkpointer 删除是异步操作，放在 route_input 调用链里执行；
-      失败降级为旧行为（记忆残留），不阻断对话
-    """
-    reset_active(thread_id)
-    try:
-        from app.agents.runtime import get_checkpointer
-        checkpointer = await get_checkpointer()
-        await checkpointer.adelete_thread(thread_id)
-        logger.info("closed 会话重开：已清空 Agent 记忆 thread=%s", thread_id)
-    except Exception:
-        # 降级：记忆清不掉就带着旧上下文继续（等价旧行为），不阻断新对话
-        logger.exception("清空 Checkpointer 线程失败，记忆将残留 thread=%s", thread_id)
-
-
 def get_thread_user(thread_id: str) -> str | None:
     """查会话归属用户；无记录/异常返回 None（不阻断对话主链路）。"""
     try:

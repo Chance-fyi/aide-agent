@@ -174,8 +174,15 @@ async def chat(
     thread_id 因此成为纯实现细节，前端无需再持久化它。
     """
     if user is not None:
-        # 服务端解析当前聊天流：优先复用，无则新建并立即绑定归属
-        thread_id = handoff.get_user_current_thread(user["username"]) or str(uuid.uuid4())
+        # 服务端解析当前聊天流：优先复用，无则新建并立即绑定归属。
+        # 当前流已 closed（上一次人工服务结束）则开新 thread：
+        # 新问题从干净的 Agent 上下文开始，旧 thread 的 Checkpointer
+        # 快照与 chat_message 记录都保留，后续排查/审计有据可查
+        thread_id = handoff.get_user_current_thread(user["username"])
+        if thread_id and handoff.get_status(thread_id) == handoff.STATUS_CLOSED:
+            thread_id = None
+        if not thread_id:
+            thread_id = str(uuid.uuid4())
         handoff.set_thread_user(thread_id, user["username"])
     else:
         # 匿名用户：维持旧行为，前端传什么用什么（localStorage 续接）
