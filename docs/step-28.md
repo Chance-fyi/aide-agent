@@ -55,3 +55,12 @@ step-27 改为多 thread 后，补丁失效为"多余且有害"：
   所有带标签的消息显示时间（今天只显示时分，更早带日期 .msg-time）
 - 端到端验证：坐席"坐席小王"回复后，用户端历史里 human 消息
   sender_name="坐席小王" ✓
+
+## step-28.3：坐席署名改 sender_id 关联（不直接存昵称）
+
+- chat_message.sender_name 改为 sender_id（关联 app_user.username）——
+  与 user_id 同一关联模式；坐席改昵称后历史消息展示自动跟随
+- get_messages / get_user_messages 查询 LEFT JOIN app_user 得 display_name，
+  对外字段仍叫 sender_name（昵称语义），屏蔽存储细节；前端零改动
+- routes.reply_thread 改传 sender_id=agent["username"]
+- schema 变更走 DROP 重建；端到端验证：库中存 agent1，接口返回"坐席小王"

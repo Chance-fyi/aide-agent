@@ -81,7 +81,7 @@ def ensure_table() -> None:
                 role       TEXT NOT NULL,              -- user / agent(智能客服) / human(人工坐席)
                 content    TEXT NOT NULL,
                 user_id    TEXT,                       -- user 角色消息的发送者（agent/human 消息为空）
-                sender_name TEXT,                      -- human 消息的坐席昵称（用户端展示"客服小王回复"）
+                sender_id  TEXT,                       -- human 消息的坐席（关联 app_user.username；昵称 JOIN 得到）
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
@@ -93,20 +93,20 @@ def ensure_table() -> None:
 
 def append_message(
     thread_id: str, role: str, content: str,
-    user_id: str | None = None, sender_name: str | None = None,
+    user_id: str | None = None, sender_id: str | None = None,
 ) -> None:
     """追加一条用户可见的会话记录。
 
     role 取值见 app.api.chat 的 ROLE_* 常量：user / agent(智能客服) / human(人工坐席)。
     user_id 仅 user 角色消息传入（记录发送者，支持"按用户查消息"）；
-    sender_name 仅 human 角色消息传入（坐席昵称，用户端展示"谁回复的"）。
+    sender_id 仅 human 角色消息传入（坐席账号，展示昵称时 JOIN app_user）。
     失败由调用方决定是否降级（记日志不抛出场景居多）。
     """
     with _get_conn() as conn:
         conn.execute(
-            "INSERT INTO chat_message (thread_id, role, content, user_id, sender_name) "
+            "INSERT INTO chat_message (thread_id, role, content, user_id, sender_id) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (thread_id, role, content, user_id, sender_name),
+            (thread_id, role, content, user_id, sender_id),
         )
 
 
@@ -115,10 +115,11 @@ def get_messages(thread_id: str) -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT role, content, created_at, sender_name
-            FROM chat_message
-            WHERE thread_id = %s
-            ORDER BY id ASC
+            SELECT m.role, m.content, m.created_at, u.display_name
+            FROM chat_message m
+            LEFT JOIN app_user u ON u.username = m.sender_id
+            WHERE m.thread_id = %s
+            ORDER BY m.id ASC
             """,
             (thread_id,),
         ).fetchall()
@@ -315,8 +316,9 @@ def get_user_messages(username: str, limit: int = 200) -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT m.thread_id, m.role, m.content, m.created_at, m.sender_name
+            SELECT m.thread_id, m.role, m.content, m.created_at, u.display_name
             FROM chat_message m
+            LEFT JOIN app_user u ON u.username = m.sender_id
             WHERE m.thread_id IN (
                 SELECT thread_id FROM conversation_status WHERE user_id = %s
             )

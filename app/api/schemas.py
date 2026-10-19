@@ -33,7 +33,7 @@ class SessionMessage(BaseModel):
     role: str                   # user / agent / human
     content: str
     ts: str | None = None
-    sender_name: str | None = None   # human 消息的坐席昵称（用户端展示用）
+    sender_name: str | None = None   # human 消息的坐席昵称（后端 JOIN 得出，用户端展示用）
 
 
 class SessionHistoryResponse(BaseModel):
