@@ -90,9 +90,7 @@ function UserChatInner({ auth, onLogout }) {
     return () => clearInterval(timer);
   }, []);
 
-  // 消息变化时滚动到底部
-  useEffect(() => {
-    // 新消息到达时滚动到底部。只在数量变化时滚：轮询每 4s 返回新数组，
+  // 消息变化时滚动到底部。只在数量变化时滚：轮询每 4s 返回新数组，
   // 无条件 scrollTo 会反复打断用户向上翻历史，造成滚动条抖动
   const prevCountRef = useRef(0);
   useEffect(() => {
