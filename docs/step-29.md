@@ -32,8 +32,11 @@
 - 新增 `GET /agent/threads/{id}/user_history`：按会话归属用户跨 thread
   拉平全部历史消息（复用 `handoff.get_user_messages`）；匿名会话返回空列表。
   仅要求坐席登录，不限定接入者——接入前也需要看历史决定是否抢单。
-- 前端 AgentConsole：详情面板新增"用户历史会话"侧栏（只读，带角色标签/时间），
-  切换会话时自动关闭。
+- 前端 AgentConsole：详情面板**主消息列表直接展示跨 thread 完整历史流**——
+  当前会话消息正常显示，以前会话的消息置灰并带"历史"标记；
+  匿名会话（无归属）回退展示当前 thread 历史。轮询同样优先拉历史流，
+  坐席接入后回复能实时出现在完整流里。
+- `SessionMessage` 增加可选 `thread_id` 字段，供前端区分旧会话/当前会话消息。
 - 验证：30 passed（新增 `test_agent_user_history`）。
 
 ## 遗留问题

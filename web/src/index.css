@@ -493,61 +493,18 @@ button:disabled { cursor: not-allowed; }
 /* locked：被其他坐席接走的本地态（仅详情面板出现），中性提示色 */
 .badge.locked { background: #e2e8f0; color: #64748b; }
 
-/* 用户历史会话侧栏：详情面板底部向上展开的只读面板 */
-.detail-tools {
-  display: flex;
-  justify-content: flex-end;
-  padding: 4px 16px 0;
-}
-.user-history-panel {
-  display: flex;
-  flex-direction: column;
-  max-height: 220px;
-  border-top: 1px solid var(--border, #e2e8f0);
-  background: #f8fafc;
-}
-.user-history-head {
-  padding: 8px 16px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-sub, #64748b);
-}
-.user-history-list {
-  overflow-y: auto;
-  padding: 0 16px 12px;
-}
-.user-history-item {
-  padding: 6px 0;
-  border-bottom: 1px dashed #e2e8f0;
-}
-.user-history-item:last-child { border-bottom: none; }
-.user-history-meta {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 2px;
-}
-.user-history-meta .role-tag {
-  font-size: 11px;
-  padding: 1px 6px;
+/* 旧会话消息（历史流里非当前 thread）：置灰 + 左侧"历史"小标签 */
+.msg-row.old-thread { opacity: 0.55; }
+.old-thread-tag {
+  font-size: 10px;
+  color: #94a3b8;
+  border: 1px solid #e2e8f0;
   border-radius: 4px;
-  background: #e2e8f0;
-  color: #475569;
+  padding: 0 5px;
+  margin-bottom: 2px;
+  width: fit-content;
 }
-.user-history-meta .role-tag.user { background: var(--accent-light); color: var(--accent); }
-.user-history-meta .role-tag.human { background: #fef3c7; color: #b45309; }
-.user-history-meta .sender-name,
-.user-history-meta .msg-ts {
-  font-size: 11px;
-  color: var(--text-sub, #94a3b8);
-}
-.user-history-content {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text, #334155);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+.msg-row.user .old-thread-tag { margin-left: auto; }
 .badge.closed { background: #f1f5f9; color: var(--text-sub); }
 
 .detail-panel {

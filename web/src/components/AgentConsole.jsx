@@ -57,9 +57,9 @@ function AgentConsoleInner({ auth, onLogout }) {
   // 队列轮询时同步刷新选中会话的状态，避免按钮与实际状态脱节
   const [selected, setSelected] = useState(null);
   const [history, setHistory] = useState([]);       // 当前会话的消息
-  // 用户历史会话侧栏：坐席接入前了解用户来龙去脉，避免用户重复叙述
-  const [userHistory, setUserHistory] = useState(null);   // null = 侧栏关闭
-  const [userHistoryLoading, setUserHistoryLoading] = useState(false);
+  // 用户完整历史流：跨 thread 合并（含当前会话与以前会话）。
+  // null = 匿名会话/未加载，回退展示当前 thread 的 history
+  const [userHistory, setUserHistory] = useState(null);
   const [reply, setReply] = useState("");           // 坐席回复用户的输入
   const [note, setNote] = useState("");             // 结束处理时的结果备注
   const [acting, setActing] = useState(false);      // accept/close 请求进行中
@@ -106,48 +106,46 @@ function AgentConsoleInner({ auth, onLogout }) {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [history]);
 
-  // 轮询选中会话的历史：用户在等待期间补发的消息要能被坐席看到。
-  // 与队列轮询同频（4s），记录表读多写少、查询轻量
+  // 轮询选中会话的消息：用户在等待期间补发的消息要能被坐席看到。
+  // 优先拉用户完整历史流（跨 thread 合并，含当前会话）；匿名会话无归属，
+  // 回退拉当前 thread 的 history。与队列轮询同频（4s），查询轻量
   useEffect(() => {
     const threadId = selected?.thread_id;
     if (!threadId) return;
     const timer = setInterval(async () => {
       try {
-        const resp = await authFetch(
-          `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.AGENT, onLogout,
-        );
+        const url = userHistory !== null
+          ? `${API_BASE}/agent/threads/${threadId}/user_history`
+          : `${API_BASE}/chat/${threadId}/history`;
+        const resp = await authFetch(url, {}, AUTH_ROLE.AGENT, onLogout);
         if (!resp.ok) return;
         const data = await resp.json();
-        setHistory(data.messages ?? []);
+        if (userHistory !== null) {
+          setUserHistory(data.messages ?? []);
+        } else {
+          setHistory(data.messages ?? []);
+        }
       } catch {
         // 轮询失败静默：下轮重试
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [selected]);
+  }, [selected, userHistory]);
 
-  // 切换/加载用户历史会话侧栏（选中会话变化时关闭重开）
-  async function toggleUserHistory() {
-    if (userHistory) {
-      setUserHistory(null);
-      return;
-    }
-    if (!selected) return;
-    setUserHistoryLoading(true);
-    setUserHistory([]);   // 先开侧栏再拉数据，避免按钮看起来没反应
+  // 加载用户完整历史流（打开会话时调用一次；之后轮询续接）。
+  // 匿名会话（无归属用户）返回空列表，保持 null 以便回退到 thread history
+  async function loadUserHistory(threadId) {
     try {
       const resp = await authFetch(
-        `${API_BASE}/agent/threads/${selected.thread_id}/user_history`,
+        `${API_BASE}/agent/threads/${threadId}/user_history`,
         {}, AUTH_ROLE.AGENT, onLogout,
       );
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) return;
       const data = await resp.json();
-      setUserHistory(data.messages ?? []);
+      // 有归属且有消息才切换到历史流视图；否则维持 thread history 回退
+      if (data.messages?.length) setUserHistory(data.messages);
     } catch {
-      setUserHistory(null);
-      setError("用户历史加载失败");
-    } finally {
-      setUserHistoryLoading(false);
+      // 加载失败静默：详情面板继续展示当前 thread 历史，不阻断
     }
   }
 
@@ -156,7 +154,7 @@ function AgentConsoleInner({ auth, onLogout }) {
     // 整包存队列项：user_display_name 供详情标题展示，status 供操作按钮显隐
     setSelected({ thread_id: threadId, status: thread.status, user_display_name: thread.user_display_name });
     setHistory([]);
-    setUserHistory(null);   // 换会话时关闭历史侧栏，避免串会话内容
+    setUserHistory(null);   // 换会话时重置历史流，避免串会话内容
     try {
       const resp = await authFetch(
         `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.AGENT, onLogout,
@@ -165,6 +163,8 @@ function AgentConsoleInner({ auth, onLogout }) {
       const data = await resp.json();
       setHistory(data.messages ?? []);
       setSelected((sel) => (sel ? { ...sel, status: data.status } : null));
+      // 异步加载完整历史流：成功后详情面板切到跨会话视图
+      loadUserHistory(threadId);
     } catch {
       setError("会话历史加载失败");
     }
@@ -310,50 +310,29 @@ function AgentConsoleInner({ auth, onLogout }) {
                 )}
               </div>
             </div>
-            {/* 工具栏：历史会话入口（随时可看，接入前/中都需要） */}
-            <div className="detail-tools">
-              <button className="ghost-btn" onClick={toggleUserHistory} disabled={userHistoryLoading}>
-                {userHistory ? "收起历史" : "用户历史会话"}
-              </button>
-            </div>
+            {/* 消息列表：优先展示用户完整历史流（旧会话置灰），
+                匿名会话/未加载回退当前 thread 历史 */}
             <div className="msg-list" ref={listRef}>
-              {history.length === 0 && <div className="queue-empty">加载中…</div>}
-              {history.map((m, i) => (
-                <div
-                  key={i}
-                  /* 坐席端视角：客户靠左，智能客服/人工坐席都靠右 */
-                  className={`msg-row ${m.role === "user" ? "assistant" : "user"}`}
-                >
-                  <MessageBubble
-                    message={m}
-                    bubbleClass={agentViewBubbleClass(m.role)}
-                  />
-                </div>
-              ))}
+              {(userHistory ?? history).length === 0 && <div className="queue-empty">加载中…</div>}
+              {(userHistory ?? history).map((m, i) => {
+                // 完整历史流里非当前 thread 的消息 = 以前会话的记录：置灰区分，
+                // 坐席能一眼看出哪些是本轮对话、哪些是用户以前问过的
+                const isOldThread = userHistory !== null && m.thread_id && m.thread_id !== selected.thread_id;
+                return (
+                  <div
+                    key={i}
+                    /* 坐席端视角：客户靠左，智能客服/人工坐席都靠右 */
+                    className={`msg-row ${m.role === "user" ? "assistant" : "user"} ${isOldThread ? "old-thread" : ""}`}
+                  >
+                    {isOldThread && <div className="old-thread-tag">历史</div>}
+                    <MessageBubble
+                      message={m}
+                      bubbleClass={agentViewBubbleClass(m.role)}
+                    />
+                  </div>
+                );
+              })}
             </div>
-            {/* 用户历史会话侧栏：跨会话的历史消息，只读展示 */}
-            {userHistory !== null && (
-              <div className="user-history-panel">
-                <div className="user-history-head">该用户的全部历史消息</div>
-                <div className="user-history-list">
-                  {userHistory.length === 0 && !userHistoryLoading && (
-                    <div className="queue-empty">暂无历史消息</div>
-                  )}
-                  {userHistory.map((m, i) => (
-                    <div key={i} className="user-history-item">
-                      <div className="user-history-meta">
-                        <span className={`role-tag ${m.role}`}>
-                          {m.role === "user" ? "用户" : m.role === "human" ? "人工" : "智能客服"}
-                        </span>
-                        {m.sender_name && <span className="sender-name">{m.sender_name}</span>}
-                        {m.ts && <span className="msg-ts">{new Date(m.ts).toLocaleString()}</span>}
-                      </div>
-                      <div className="user-history-content">{m.content}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
             {/* 回复栏：仅接入后（in_service）显示；排队中可看记录但须先接入再回复 */}
             {selected.status === "in_service" && (
             <div className="reply-bar">
