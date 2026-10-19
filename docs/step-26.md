@@ -76,3 +76,16 @@ closed 后由后端自动重开（上下文清零），无需用户手动干预�
 
 验证：单测（无行 UPSERT / 转接后归属保留）+ 端到端
 （登录 → 发消息 → 查库 user_name = 用户名）通过。
+
+## step-26.2：会话归属改 user_id 关联 + 展示昵称 + 测试数据清理脚本
+
+- **归属改 ID 关联**：conversation_status 新增 user_id 列（存 app_user.username，
+  即主键），旧 user_name 一次性数据迁移（幂等 UPDATE ... WHERE user_id IS NULL）。
+  用户改名/删号时归属不悬空，展示时 LEFT JOIN app_user 得昵称
+- **坐席端展示昵称**：list_live_threads JOIN 出 user_display_name（display_name），
+  前端 `user_name` 引用同步改为 `user_display_name`；匿名/已删号回退"游客 + ID 前 8 位"
+- **scripts/cleanup_test_data.py**：测试数据清理工具——按 thread_id 前缀
+  （tc-/unit-/ctx-/e2e-/test-）与会话测试账号模式删 chat_message /
+  conversation_status / app_user；默认预览，--apply 才删除。
+  联调后执行即可清空消息列表里的测试残留
+- 端到端验证：用户"王小明"发消息 + 转接后，坐席队列显示"王小明"✓

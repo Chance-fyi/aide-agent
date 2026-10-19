@@ -60,9 +60,15 @@ def ensure_table() -> None:
         """)
         conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS agent_name TEXT")
         conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS resolution TEXT")
-        # step-22 登录体系：记录会话归属用户（匿名会话为空），
-        # 用于历史接口的访问控制（非本人且非坐席不可看别人的会话）
-        conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS user_name TEXT")
+        # step-26.2 会话归属改用 user_id 关联 app_user（字符串 username 即主键）：
+        # 用户改名/删号时归属不悬空，展示昵称时 JOIN 得到。
+        # 旧列 user_name 一次性迁移后不再使用（保留列避免破坏性变更）
+        conn.execute("ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS user_id TEXT")
+        # 迁移：只搬还没有 user_id 的行（幂等）
+        conn.execute("""
+            UPDATE conversation_status SET user_id = user_name
+            WHERE user_id IS NULL AND user_name IS NOT NULL
+        """)
         # 用户可见的会话记录表：用户/机器人/人工坐席的消息都落在这里。
         # 为什么不用 Checkpointer 当历史源：Checkpointer 是 Agent 执行快照，
         # 坐席回复、纯转达类消息不经过图执行，写不进去；
@@ -120,9 +126,10 @@ def list_live_threads() -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT thread_id, status, reason, agent_name, updated_at, user_name
-            FROM conversation_status
-            WHERE status = ANY(%s)
+            SELECT cs.thread_id, cs.status, cs.reason, cs.agent_name, cs.updated_at, u.display_name
+            FROM conversation_status cs
+            LEFT JOIN app_user u ON u.username = cs.user_id
+            WHERE cs.status = ANY(%s)
             ORDER BY updated_at ASC           -- 先转接的排前面，先进先出
             """,
             (list(_LIVE_STATUSES),),
@@ -134,7 +141,8 @@ def list_live_threads() -> list[dict]:
             "reason": r[2],
             "agent_name": r[3],
             "updated_at": r[4].isoformat(),
-            "user_name": r[5],
+            # 展示昵称（display_name），匿名/已删号用户为 None，前端回退"游客"
+            "user_display_name": r[5],
         }
         for r in rows
     ]
@@ -258,7 +266,7 @@ def get_thread_user(thread_id: str) -> str | None:
     try:
         with _get_conn() as conn:
             row = conn.execute(
-                "SELECT user_name FROM conversation_status WHERE thread_id = %s",
+                "SELECT user_id FROM conversation_status WHERE thread_id = %s",
                 (thread_id,),
             ).fetchone()
             return row[0] if row else None
@@ -279,10 +287,10 @@ def set_thread_user(thread_id: str, username: str) -> None:
         with _get_conn() as conn:
             conn.execute(
                 """
-                INSERT INTO conversation_status (thread_id, status, user_name)
+                INSERT INTO conversation_status (thread_id, status, user_id)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (thread_id)
-                DO UPDATE SET user_name = EXCLUDED.user_name, updated_at = now()
+                DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = now()
                 """,
                 (thread_id, STATUS_ACTIVE, username),
             )

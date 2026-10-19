@@ -224,9 +224,9 @@ function AgentConsoleInner({ auth, onLogout }) {
               onClick={() => openThread(t)}
             >
               <div className="queue-item-top">
-                {/* 优先显示登录用户名；匿名会话回退 thread_id 前 8 位 */}
+                {/* 优先显示用户昵称（后端 JOIN 得出）；匿名会话回退"游客 + ID 前 8 位" */}
                 <span className="thread-id">
-                  {t.user_name || `游客 ${t.thread_id.slice(0, 8)}`}
+                  {t.user_display_name || `游客 ${t.thread_id.slice(0, 8)}`}
                 </span>
                 <span className={`badge ${t.status}`}>{STATUS_LABEL[t.status] ?? t.status}</span>
               </div>
@@ -251,7 +251,7 @@ function AgentConsoleInner({ auth, onLogout }) {
           <>
             <div className="detail-head">
               <h2>
-                {selected.user_name || `游客 ${selected.thread_id.slice(0, 8)}`}
+                {selected.user_display_name || `游客 ${selected.thread_id.slice(0, 8)}`}
                 <span className={`badge ${selected.status}`}>{STATUS_LABEL[selected.status] ?? selected.status}</span>
               </h2>
               {/* 操作按钮按会话状态显隐：
