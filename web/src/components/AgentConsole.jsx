@@ -101,10 +101,12 @@ function AgentConsoleInner({ auth, onLogout }) {
     return () => clearInterval(pollRef.current);
   }, [refreshQueue]);
 
-  // 消息/历史变化时滚动到底部
+  // 消息变化时滚动到底部：详情面板默认展示最新消息（滚动条停在最下面）。
+  // 完整历史流（userHistory）和回退的 thread 历史（history）都要监听，
+  // 否则历史流视图加载完成后不会触发滚动，停在顶部看不到最新消息
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [history]);
+  }, [history, userHistory]);
 
   // 轮询选中会话的消息：用户在等待期间补发的消息要能被坐席看到。
   // 优先拉用户完整历史流（跨 thread 合并，含当前会话）；匿名会话无归属，
