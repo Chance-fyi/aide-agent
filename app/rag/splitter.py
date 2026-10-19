@@ -205,19 +205,9 @@ def load_and_split_all(
         if not f.is_file():
             continue
         strategy = force or strategies.get(f.name) or _default_strategy(f.suffix.lower())
-        if f.suffix.lower() == ".md":
-            all_chunks.extend(split_markdown(f.read_text(encoding="utf-8"), source=f.name, strategy=strategy))
-            continue
-        loader = _LOADERS.get(f.suffix.lower())
-        if loader is None:
-            logger.debug("跳过不支持的文件格式: %s", f.name)
-            continue
-        # 纯文本格式只有一种切法（段落聚合），loader 不接受策略参数；
-        # 但 force=fixed 时也尊重配置（对照实验覆盖所有文件）
-        if strategy == "fixed" and f.suffix.lower() != ".md":
-            all_chunks.extend(split_markdown(f.read_text(encoding="utf-8"), source=f.name, strategy="fixed"))
-        else:
-            all_chunks.extend(loader(f))
+        # 逐文件切分统一走 split_file：目录批处理与重建流程共用同一套
+        # 后缀分派/策略语义，避免两处逻辑漂移
+        all_chunks.extend(split_file(f, strategy))
     return all_chunks
 
 def split_file(path: Path, strategy: str) -> list[Chunk]:
