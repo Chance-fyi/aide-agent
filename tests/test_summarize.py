@@ -58,29 +58,27 @@ def test_window_start_index_never_splits_tool_chain():
 # 决策：plan_summary
 # ============================================================
 
-def test_no_trigger_when_nothing_aged_out():
-    """窗口还没滑出任何内容时不压缩（新会话不应产生额外 LLM 调用）。"""
+def test_no_trigger_when_window_below_target():
+    """窗口还没长到目标大小就不压缩（新会话不应产生额外 LLM 调用）。"""
     plan = plan_summary(_rounds(3), 0, max_rounds=10, trigger_rounds=5)
     assert plan.should_run is False
 
-def test_no_trigger_below_threshold():
-    """滑出了 3 轮，但阈值是 5 轮 → 再等等，攒够一批压一次。"""
+def test_no_trigger_within_slack():
+    """涨到 N 但还没到 N+trigger：不压，让窗口多长几轮换缓存命中。"""
     plan = plan_summary(_rounds(13), 0, max_rounds=10, trigger_rounds=5)
     assert plan.should_run is False
 
-def test_trigger_when_threshold_reached():
-    """滑出 5 轮且阈值 5 → 触发，且压的正是那 5 轮。"""
-    msgs = _rounds(15)
-    plan = plan_summary(msgs, 0, max_rounds=10, trigger_rounds=5)
+def test_trigger_at_target_plus_slack():
+    """达到 max_rounds + trigger 才触发。"""
+    plan = plan_summary(_rounds(15), 0, max_rounds=10, trigger_rounds=5)
     assert plan.should_run is True
-    # 15 轮共 30 条；窗口留 10 轮 → 压缩前 10 条（5 轮）
-    assert len(plan.to_summarize) == 10
+    # 压缩到最近 10 轮处：15 轮 30 条 → 水位线推到第 10 条（第 5 轮起）
+    assert plan.next_summarized_count == 10
     assert plan.to_summarize[0].content == "问题0"
     assert plan.to_summarize[-1].content == "回答4"
-    assert plan.next_summarized_count == 10
 
 def test_watermark_prevents_recompression():
-    """水位线已推进到窗口边界后，同一批消息不能被重复压缩。
+    """压缩后水位线推进，窗口回到目标大小 → 不再触发。
 
     否则每轮都会为同一段历史付一次 LLM 费用。
     """
@@ -88,23 +86,34 @@ def test_watermark_prevents_recompression():
     plan = plan_summary(msgs, 10, max_rounds=10, trigger_rounds=5)
     assert plan.should_run is False
 
-def test_only_newly_aged_out_portion_is_compressed():
-    """水位线之后的增量部分才是本次要压的（摘要逐次累积）。"""
-    msgs = _rounds(20)   # 40 条，窗口留 10 轮 → 边界 20
+def test_watermark_only_advances_on_trigger():
+    """窗口只增不减：水位线不动时，即使消息变多也不重压同一段。"""
+    msgs = _rounds(20)   # 40 条
     plan = plan_summary(msgs, 10, max_rounds=10, trigger_rounds=5)
     assert plan.should_run is True
-    assert len(plan.to_summarize) == 10          # 只压 10~20 这段
-    assert plan.to_summarize[0].content == "问题5"
     assert plan.next_summarized_count == 20
+    assert plan.to_summarize[0].content == "问题5"   # 只压增量段
+    assert len(plan.to_summarize) == 10
 
 def test_trigger_rounds_zero_disables_compression():
-    """<=0 关闭压缩：退化为纯窗口裁剪（step-35 行为）。"""
+    """<=0 关闭压缩：窗口永不重置（不再裁剪，等价全量发送）。"""
     plan = plan_summary(_rounds(50), 0, max_rounds=10, trigger_rounds=0)
     assert plan.should_run is False
 
 def test_watermark_ahead_of_window_is_safe():
-    """水位线异常超前（如配置调小 max_rounds）不能崩，也不能回退。"""
+    """水位线异常超前（如配置调小 max_rounds）不能崩，也不能倒退。"""
     plan = plan_summary(_rounds(3), 99, max_rounds=10, trigger_rounds=1)
+    assert plan.should_run is False
+
+def test_compression_never_moves_watermark_backwards():
+    """水位线必须单调推进。
+
+    若 next_start <= 当前水位线，宁可跳过压缩也不能回退——
+    回退会让同一段历史被反复压缩（重复付费 + 摘要被重复叠加）。
+    """
+    # 水位线已经贴到窗口边界时，即使轮数满足也不该倒退
+    msgs = _rounds(20)
+    plan = plan_summary(msgs, 20, max_rounds=10, trigger_rounds=5)
     assert plan.should_run is False
 
 # ============================================================
@@ -253,8 +262,10 @@ def test_agent_node_injects_summary_and_keeps_history(monkeypatch):
         assert sent[0].type == "system"
         assert SUMMARY_HEADER in sent[0].content
         assert "用户想退货" in sent[0].content
-        # 窗口：system + 最近 2 轮
-        assert len(sent) == 5
+        # 窗口 = 水位线 4 之后的全部消息（5 轮 10 条 → 剩 6 条）+ system
+        # 注意：锚定水位线后窗口不再精确等于 N 轮，这是保前缀缓存的代价
+        assert len(sent) == 7
+        assert sent[1].content == "问题2"
 
         # 关键：state 更新里不能出现删消息的指令，历史必须原样保留
         assert list(update["messages"]) == [update["messages"][-1]]

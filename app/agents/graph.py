@@ -65,14 +65,33 @@ def _last_text_message(messages: list[AnyMessage], msg_type: str) -> AnyMessage 
         None,
     )
 
-def _window_messages(messages: list[AnyMessage], max_rounds: int) -> list[AnyMessage]:
-    """按「轮」截取最近 max_rounds 轮对话，返回可发给 LLM 的消息窗口。
+def _window_messages(
+    messages: list[AnyMessage],
+    max_rounds: int,
+    summarized_count: int = 0,
+) -> list[AnyMessage]:
+    """返回可发给 LLM 的消息窗口（锚定在水位线上，而非滑动）。
 
-    为什么需要：Checkpointer 里的 messages 只增不减，长会话每轮都把全部
-    历史送给 LLM，token 成本线性上涨，迟早撞上模型上下文上限。
+    为什么需要裁剪：Checkpointer 里的 messages 只增不减，长会话每轮都把
+    全部历史送给 LLM，token 成本线性上涨，迟早撞上模型上下文上限。
 
-    为什么在「human 消息边界」切：一轮 = 一条用户消息 + 其后的 agent/tool
-    往返。从 human 边界开窗能保证：
+    **为何锚定水位线（summarized_count）而不是"最近 max_rounds 轮"**
+
+    滑动窗口（`messages[start:]`，start 随轮次前移）会让每轮请求的
+    message 序列**整体左移**，公共前缀只剩 system 一条——前缀缓存（prompt
+    caching）全部失效。实测：窗口 3 轮时连续 4 轮请求的公共前缀均为 1/7 条。
+
+    锚定水位线后，窗口只在**压缩发生时**才左移：
+        第4轮 [q0,a0,q1,a1,q2,a2,q3,a3]
+        第5轮 [q2,a2,q3,a3,q4,a4]      ← 压缩，前缀重置
+        第6轮 [q2,a2,q3,a3,q4,a4,q5,a5] ← 前缀 6/6 命中
+        第7轮 [q4,a4,...]               ← 又压缩
+    即：压缩间隔内每轮都是上一轮的**严格延长**，缓存完全命中。
+
+    代价：窗口轮数在 max_rounds ~ max_rounds+trigger 之间摆动
+    （拿"窗口略大"换"缓存命中"）。详见 summarize.plan_summary。
+
+    为什么在「human 消息边界」切：
     1. 窗口首条是 HumanMessage，模型不会看到“没头没尾”的对话
     2. 绝不出现孤立的 ToolMessage——tool_calls 与 ToolMessage 必须成对，
        截在中间会让 [OI] 兼容接口直接 400
@@ -86,8 +105,9 @@ def _window_messages(messages: list[AnyMessage], max_rounds: int) -> list[AnyMes
     if max_rounds <= 0:
         return list(messages)
 
-    # 边界计算与压缩模块共用同一套语义（human 消息边界），避免两处漂移
-    start = summarize.window_start_index(messages, max_rounds)
+    # 锚点：已压进摘要的位置即窗口左边界。
+    # 没压过（0）就是全量；压缩后窗口从水位线开始，此后只向右增长
+    start = max(0, min(summarized_count, len(messages)))
     return list(messages[start:])
 
 # ============================================================
@@ -270,15 +290,18 @@ def _make_agent_node():
             max_chars=settings.summary_max_chars,
         )
 
-        # 第二步：取最近 N 轮作为逐字窗口（state 里的完整历史不动）
-        window = _window_messages(history, settings.history_max_rounds)
-        if len(window) < len(history):
-            # 记日志才能验证成本控制真的生效（否则只能看账单猜）
+        # 第二步：取窗口 = 水位线之后的消息（锚定不滑动，保前缀缓存）。
+        # 水位线只在本轮压缩成功时前进，所以窗口只会在压缩时重置，
+        # 压缩间隔内每轮请求都是上一轮的严格延长 → 缓存命中
+        window = _window_messages(
+            history, settings.history_max_rounds, outcome.summarized_count
+        )
+        if outcome.summarized_count > state.get("summarized_count", 0):
             logger.info(
-                "上下文已裁剪 thread=%s %d→%d 条消息",
+                "上下文窗口已重置 thread=%s 从第 %d 条起（共 %d 条）",
                 config["configurable"]["thread_id"],
+                outcome.summarized_count,
                 len(history),
-                len(window),
             )
 
         # 第三步：系统提示 + 摘要合并成一条 system（部分厂商只接受单条）

@@ -96,7 +96,10 @@ class SummaryPlan:
     to_summarize: tuple[AnyMessage, ...] = ()
     # 压缩完成后应写入的"已压缩消息条数"（水位线）。
     # 存条数而不是存轮数/时间戳：messages 是 append-only 的，
-    # 条数是唯一不会随重放而漂移的锚点
+    # 条数是唯一不会随重放而漂移的锚点。
+    #
+    # 水位线同时充当**窗口左边界**（见 graph._window_messages）：
+    # 窗口不滑动，只在压缩时重置——这是为了保住前缀缓存
     next_summarized_count: int = 0
 
 def plan_summary(
@@ -107,31 +110,38 @@ def plan_summary(
 ) -> SummaryPlan:
     """决定本轮是否需要压缩，以及压缩哪一段。
 
-    触发条件：**已滑出窗口、但还没被压缩过**的轮数 >= trigger_rounds。
+    触发条件：**水位线以来积累的轮数 >= max_rounds + trigger_rounds**。
 
-    为什么要"攒够一批再压"而不是滑出一轮就压：
-    每次压缩都是一次额外 LLM 调用。逐轮压缩会让长会话的成本翻倍；
-    攒 5 轮压一次，成本降一个数量级，而信息损失可忽略
-    （被延迟压缩的旧消息本来就已经不在窗口里了）。
+    为什么不是"滑出窗口的轮数 >= trigger"（旧逻辑）：
+    旧逻辑下窗口是滑动的（最近 N 轮），每轮请求的 message 序列都整体左移，
+    前缀缓存（prompt caching）全部失效——实测公共前缀只剩 system 一条。
 
-    trigger_rounds <= 0 视为关闭压缩，永远不触发。
+    新逻辑下窗口锚定水位线，只在压缩时左移。阈值取 max_rounds + trigger
+    的含义是：窗口长到目标大小 N 后，再允许多攒 trigger 轮才压一次，
+    于是窗口在 N ~ N+trigger 之间摆动（拿"窗口略大"换"缓存命中"）。
+
+    trigger_rounds <= 0 视为关闭压缩：此时退化为"永不压缩、全量发送"，
+    由 max_rounds<=0 控制是否完全不限制。
     """
     if trigger_rounds <= 0:
         return SummaryPlan(should_run=False)
 
-    start = window_start_index(messages, max_rounds)
-    # 水位线已越过窗口边界，或水位线异常超前：本轮无新内容可压
-    if summarized_count >= start:
+    # 水位线异常超前（如配置调小）时夹紧，避免切片越界
+    start = max(0, min(summarized_count, len(messages)))
+    if _rounds_in(messages[start:]) < max_rounds + trigger_rounds:
         return SummaryPlan(should_run=False)
 
-    pending = messages[summarized_count:start]
-    if _rounds_in(pending) < trigger_rounds:
+    # 压缩到"最近 max_rounds 轮"处，让压缩后的窗口正好回到目标大小
+    next_start = window_start_index(messages, max_rounds)
+    # 理论上 next_start 一定 > start（刚满足了轮数阈值），
+    # 但防御性检查：不能倒退，否则水位线会回退导致重复压缩
+    if next_start <= start:
         return SummaryPlan(should_run=False)
 
     return SummaryPlan(
         should_run=True,
-        to_summarize=tuple(pending),
-        next_summarized_count=start,
+        to_summarize=tuple(messages[start:next_start]),
+        next_summarized_count=next_start,
     )
 
 # ============================================================
