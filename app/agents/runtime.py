@@ -25,24 +25,6 @@ logger = logging.getLogger(__name__)
 _lock = asyncio.Lock()
 _pool: AsyncConnectionPool | None = None
 _graph: CompiledStateGraph | None = None
-# Checkpointer 的"就绪信箱"：handoff 的 reset_active_fresh 需要拿到
-# checkpointer 实例清空 Agent 记忆，但它是懒初始化的——用 Future 解耦
-# 初始化时序。Future 延迟到首次访问时创建（模块导入时可能还没有事件循环，
-# Python 3.12+ 在无运行循环时 get_event_loop 会报错）
-_checkpointer_ready: asyncio.Future | None = None
-
-
-def _checkpointer_future() -> asyncio.Future:
-    global _checkpointer_ready
-    if _checkpointer_ready is None:
-        _checkpointer_ready = asyncio.get_running_loop().create_future()
-    return _checkpointer_ready
-
-
-async def get_checkpointer() -> AsyncPostgresSaver:
-    """获取已初始化的 Checkpointer（未就绪则等待初始化完成）。"""
-    return await asyncio.shield(_checkpointer_future())
-
 
 async def get_graph() -> CompiledStateGraph:
     """懒加载单例：首次调用时建连接池、Checkpointer、建表、编译图。

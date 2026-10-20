@@ -8,7 +8,7 @@
 - 🧠 多轮记忆：LangGraph Postgres Checkpointer 持久化会话
 - 🙋 人工转接：LLM 自主判断 + 关键词规则兜底的双触发机制
 - ⚠️ 异常处理：检索降级、拒答、重试、输入防护（迭代中）
-- 📊 评估与可观测：黄金问答集 + Langfuse（排期中）
+- 📊 评估：黄金问答集 + 检索/生成两层跑分（`scripts/run_eval.py`）；Langfuse 排期中
 
 ## 快速开始
 

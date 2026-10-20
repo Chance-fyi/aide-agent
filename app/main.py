@@ -69,7 +69,8 @@ async def lifespan(app: FastAPI):
         await sweeper
     except asyncio.CancelledError:
         pass
-    runtime.close()
+    # close() 是协程，必须 await：早先漏了 await，连接池从未被真正关闭
+    await runtime.close()
 
 
 app = FastAPI(

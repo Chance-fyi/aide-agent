@@ -1,0 +1,30 @@
+{"id": "returns-1", "category": "退货", "question": "我买的东西不想要了，签收 5 天了还能退吗？", "expect_sources": ["returns.md"], "expect_points": ["7天", "无理由"], "expect_transfer": false}
+{"id": "returns-2", "category": "退货", "question": "退货的运费谁承担？", "expect_sources": ["returns.md"], "expect_points": ["质量问题", "商家承担"], "expect_transfer": false}
+{"id": "returns-3", "category": "退货", "question": "定制的商品可以无理由退货吗？", "expect_sources": ["returns.md"], "expect_points": ["不支持"], "expect_transfer": false}
+{"id": "refund-1", "category": "退款", "question": "退款一般多久能到账？", "expect_sources": ["refund.md"], "expect_points": ["工作日"], "expect_any": ["1-3", "1~3", "1至3", "3-7", "3~7", "3至7"], "expect_transfer": false}
+{"id": "refund-2", "category": "退款", "question": "还没发货的订单可以只退款不退货吗？", "expect_sources": ["refund.md"], "expect_points": ["未发货"], "expect_transfer": false}
+{"id": "exchange-1", "category": "换货", "question": "收到的东西有质量问题，能换货吗？", "expect_sources": ["exchange.md"], "expect_points": ["15天"], "expect_transfer": false}
+{"id": "exchange-2", "category": "换货", "question": "换货的往返运费谁出？", "expect_sources": ["exchange.md"], "expect_points": ["商家承担"], "expect_transfer": false}
+{"id": "shipping-1", "category": "物流", "question": "下单后多久发货？", "expect_sources": ["shipping.md"], "expect_points": ["48小时"], "expect_transfer": false}
+{"id": "shipping-2", "category": "物流", "question": "新疆能发货吗？", "expect_sources": ["shipping.md"], "expect_points": ["偏远地区"], "expect_transfer": false}
+{"id": "shipping-3", "category": "物流", "question": "物流显示签收但我没收到包裹怎么办？", "expect_sources": ["shipping.md"], "expect_points": ["核查"], "expect_transfer": false}
+{"id": "payment-1", "category": "支付", "question": "你们支持哪些支付方式？", "expect_sources": ["payment.md"], "expect_points": ["支付宝", "微信"], "expect_transfer": false}
+{"id": "payment-2", "category": "支付", "question": "支付失败了怎么办？", "expect_sources": ["payment.md"], "expect_points": ["余额"], "expect_transfer": false}
+{"id": "payment-3", "category": "支付", "question": "怎么开发票？能开专票吗？", "expect_sources": ["payment.md"], "expect_points": ["发票"], "expect_any": ["增值税", "专用发票"], "expect_transfer": false}
+{"id": "membership-1", "category": "会员", "question": "会员有哪几个等级？", "expect_sources": ["membership.md"], "expect_points": ["钻石"], "expect_transfer": false}
+{"id": "membership-2", "category": "会员", "question": "积分怎么用？", "expect_sources": ["membership.md"], "expect_points": ["抵扣"], "expect_transfer": false}
+{"id": "coupons-1", "category": "优惠券", "question": "优惠券可以叠加使用吗？", "expect_sources": ["coupons.md"], "expect_points": ["叠加"], "expect_transfer": false}
+{"id": "coupons-2", "category": "优惠券", "question": "订单退款后优惠券会返还吗？", "expect_sources": ["coupons.md"], "expect_points": ["部分退款"], "expect_transfer": false}
+{"id": "account-1", "category": "账号", "question": "怎么修改绑定的手机号？", "expect_sources": ["account.md"], "expect_points": ["短信"], "expect_transfer": false}
+{"id": "account-2", "category": "账号", "question": "注销账号需要什么条件？", "expect_sources": ["account.md"], "expect_points": ["冷静期"], "expect_transfer": false}
+{"id": "account-3", "category": "账号", "question": "忘记密码了怎么找回？", "expect_sources": ["account.md"], "expect_points": ["手机号"], "expect_transfer": false}
+{"id": "warranty-1", "category": "保修", "question": "买的手机保修多久？", "expect_sources": ["warranty.md"], "expect_points": ["1年"], "expect_transfer": false}
+{"id": "warranty-2", "category": "保修", "question": "人为损坏能保修吗？", "expect_sources": ["warranty.md"], "expect_points": ["付费维修"], "expect_transfer": false}
+{"id": "faq-1", "category": "常见问题", "question": "怎么修改收货地址？", "expect_sources": ["faq.md"], "expect_points": ["待发货"], "expect_transfer": false}
+{"id": "faq-2", "category": "常见问题", "question": "商品刚买就降价了，能补差价吗？", "expect_sources": ["faq.md"], "expect_points": ["价格保护"], "expect_transfer": false}
+{"id": "faq-3", "category": "常见问题", "question": "预售商品一直不发货怎么办？", "expect_sources": ["faq.md"], "expect_points": ["全额退款"], "expect_transfer": false}
+{"id": "handoff-1", "category": "转人工", "question": "我要投诉，你们客服态度太差了！", "expect_transfer": true}
+{"id": "handoff-2", "category": "转人工", "question": "转人工", "expect_transfer": true}
+{"id": "outofscope-1", "category": "超范围", "question": "帮我写一段 Python 快速排序代码", "expect_any": ["售前", "售后", "帮不了", "无法", "抱歉", "不能"], "expect_transfer": false}
+{"id": "outofscope-2", "category": "超范围", "question": "今天天气怎么样？", "expect_any": ["售前", "售后", "帮不了", "无法", "抱歉", "不能"], "expect_transfer": false}
+{"id": "unkb-1", "category": "知识库外", "question": "你们支持货到付款吗？", "expect_any": ["不支持", "没有", "无法", "暂不", "人工客服"]}
