@@ -25,13 +25,13 @@
 {"id": "payment-3", "category": "支付", "question": "怎么开发票？能开专票吗？", "expect_sources": ["payment.md"], "expect_points": ["发票"], "expect_any": ["增值税", "专用发票"], "expect_transfer": false}
 {"id": "membership-1", "category": "会员", "question": "会员有哪几个等级？", "expect_sources": ["membership.md"], "expect_points": ["钻石"], "expect_transfer": false}
 {"id": "membership-2", "category": "会员", "question": "积分怎么用？", "expect_sources": ["membership.md"], "expect_points": ["抵扣"], "expect_transfer": false}
-{"id": "coupons-1", "category": "优惠券", "question": "优惠券可以叠加使用吗？", "expect_sources": ["coupons.md"], "expect_points": ["叠加"], "expect_transfer": false}
+{"id": "coupons-1", "category": "优惠券", "question": "优惠券可以叠加使用吗？", "expect_sources_any": ["coupons.md", "coupon-store.md", "coupon-category.md"], "expect_points": ["叠加"], "expect_transfer": false}
 {"id": "coupons-2", "category": "优惠券", "question": "订单退款后优惠券会返还吗？", "expect_sources": ["coupons.md"], "expect_points": ["部分退款"], "expect_transfer": false}
 {"id": "account-1", "category": "账号", "question": "怎么修改绑定的手机号？", "expect_sources": ["account.md"], "expect_points": ["短信"], "expect_transfer": false}
 {"id": "account-2", "category": "账号", "question": "注销账号需要什么条件？", "expect_sources": ["account.md"], "expect_points": ["冷静期"], "expect_transfer": false}
 {"id": "account-3", "category": "账号", "question": "忘记密码了怎么找回？", "expect_sources": ["account.md"], "expect_points": ["手机号"], "expect_transfer": false}
-{"id": "warranty-1", "category": "保修", "question": "买的手机保修多久？", "expect_sources": ["warranty.md"], "expect_points": ["1年"], "expect_transfer": false}
-{"id": "warranty-2", "category": "保修", "question": "人为损坏能保修吗？", "expect_sources": ["warranty.md"], "expect_points": ["付费维修"], "expect_transfer": false}
+{"id": "warranty-1", "category": "保修", "question": "买的手机保修多久？", "expect_sources_any": ["warranty.md", "warranty-3c.md"], "expect_points": ["1年"], "expect_transfer": false}
+{"id": "warranty-2", "category": "保修", "question": "人为损坏能保修吗？", "expect_sources_any": ["warranty.md", "warranty-3c.md", "warranty-furniture.md"], "expect_points": ["付费维修"], "expect_transfer": false}
 {"id": "faq-1", "category": "常见问题", "question": "怎么修改收货地址？", "expect_sources": ["faq.md"], "expect_points": ["待发货"], "expect_transfer": false}
 {"id": "faq-2", "category": "常见问题", "question": "商品刚买就降价了，能补差价吗？", "expect_sources": ["faq.md"], "expect_points": ["价格保护"], "expect_transfer": false}
 {"id": "faq-3", "category": "常见问题", "question": "预售商品一直不发货怎么办？", "expect_sources": ["faq.md"], "expect_points": ["全额退款"], "expect_transfer": false}
@@ -41,13 +41,13 @@
 # 考的是 embedding 泛化能力：说法越口语，纯向量检索越容易漏
 # ============================================================
 {"id": "para-1", "category": "同义改写", "question": "东西到手了发现不合心意，多久之内能反悔？", "expect_sources": ["returns.md"], "expect_any": ["7天"], "expect_transfer": false}
-{"id": "para-2", "category": "同义改写", "question": "包装拆了还能不能退？", "expect_sources": ["returns.md"], "expect_any": ["未使用", "不影响二次销售"], "expect_transfer": false}
+{"id": "para-2", "category": "同义改写", "question": "包装拆了还能不能退？", "expect_sources_any": ["returns.md", "returns-3c.md", "returns-apparel.md", "returns-books.md", "returns-large.md"], "expect_any": ["未使用", "不影响二次销售", "拆封", "塑封", "吊牌"], "expect_transfer": false}
 {"id": "para-3", "category": "同义改写", "question": "我不想要了寄回去的邮费是我出还是你们出？", "expect_sources": ["returns.md"], "expect_any": ["买家", "自行承担"], "expect_transfer": false}
 {"id": "para-4", "category": "同义改写", "question": "积分能当钱花吗？", "expect_sources": ["membership.md"], "expect_any": ["抵扣"], "expect_transfer": false}
-{"id": "para-5", "category": "同义改写", "question": "买贵了能退我差价吗？", "expect_sources": ["faq.md"], "expect_any": ["价格保护", "差价"], "expect_transfer": false}
+{"id": "para-5", "category": "同义改写", "question": "买贵了能退我差价吗？", "expect_sources_any": ["faq.md", "service-priceprotect.md"], "expect_any": ["价格保护", "价保", "差价"], "expect_transfer": false}
 {"id": "para-6", "category": "同义改写", "question": "发票能不能开成我们公司的抬头？", "expect_sources": ["payment.md"], "expect_any": ["增值税", "专用发票", "抬头"], "expect_transfer": false}
 {"id": "para-7", "category": "同义改写", "question": "快递一直不动好几天了怎么办？", "expect_sources": ["shipping.md"], "expect_any": ["核查", "客服"], "expect_transfer": false}
-{"id": "para-8", "category": "同义改写", "question": "东西摔坏了还在保修里吗？", "expect_sources": ["warranty.md"], "expect_any": ["人为损坏", "付费维修"], "expect_transfer": false}
+{"id": "para-8", "category": "同义改写", "question": "东西摔坏了还在保修里吗？", "expect_sources_any": ["warranty.md", "warranty-3c.md", "warranty-furniture.md", "warranty-home.md"], "expect_any": ["人为损坏", "付费维修"], "expect_transfer": false}
 
 # ============================================================
 # 三、易混淆（相邻政策的数字/责任方不同）
@@ -57,14 +57,14 @@
 {"id": "conf-1", "category": "易混淆", "question": "质量问题想换一个新的，超过一周了还能换吗？", "expect_sources": ["exchange.md"], "expect_any": ["15天"], "expect_transfer": false}
 {"id": "conf-2", "category": "易混淆", "question": "无理由退货是几天内？", "expect_sources": ["returns.md"], "expect_any": ["7天"], "expect_transfer": false}
 {"id": "conf-3", "category": "易混淆", "question": "质量问题换货，我寄过去的运费能报销吗？", "expect_sources": ["exchange.md"], "expect_any": ["商家承担", "返还", "垫付"], "expect_transfer": false}
-{"id": "conf-4", "category": "易混淆", "question": "数码家电的保修期是多久？", "expect_sources": ["warranty.md"], "expect_any": ["1年"], "expect_transfer": false}
+{"id": "conf-4", "category": "易混淆", "question": "数码家电的保修期是多久？", "expect_sources_any": ["warranty.md", "warranty-3c.md", "warranty-home.md"], "expect_any": ["1年"], "expect_transfer": false}
 {"id": "conf-5", "category": "易混淆", "question": "待发货的订单能取消吗？取消后钱怎么退？", "expect_sources": ["faq.md", "refund.md"], "expect_any": ["1-3", "1~3", "1至3"], "expect_transfer": false}
 
 # ============================================================
 # 四、多跳（一条回答需要综合两个文件）
 # 单文件召回不够用：只命中其中一个就会答半截
 # ============================================================
-{"id": "multi-1", "category": "多跳", "question": "退货寄回去以后，钱多久能退到我的银行卡里？", "expect_sources": ["returns.md", "refund.md"], "expect_any": ["3-7", "3~7", "3至7", "3到7"], "expect_transfer": false}
+{"id": "multi-1", "category": "多跳", "question": "退货寄回去以后，钱多久能退到我的银行卡里？", "expect_sources": ["refund.md"], "expect_sources_any": ["returns.md", "returns-3c.md", "returns-apparel.md", "returns-books.md", "returns-large.md"], "expect_any": ["3-7", "3~7", "3至7", "3到7"], "expect_transfer": false}
 {"id": "multi-2", "category": "多跳", "question": "用了优惠券的订单退货了，券会还给我吗？钱怎么退？", "expect_sources": ["coupons.md"], "expect_any": ["返还", "有效期"], "expect_transfer": false}
 {"id": "multi-3", "category": "多跳", "question": "换货的商品你们收到后多久能发新的？", "expect_sources": ["exchange.md"], "expect_any": ["3个工作日", "3 个工作日"], "expect_transfer": false}
 
@@ -96,6 +96,88 @@
 # 这些题检索可能命中相邻文件，但答案必须坦诚说没有
 # ============================================================
 {"id": "unkb-1", "category": "知识库外", "question": "你们支持货到付款吗？", "expect_any": ["不支持", "没有", "无法", "暂不", "人工客服"]}
-{"id": "unkb-2", "category": "知识库外", "question": "可以分期付款吗？", "expect_any": ["不支持", "没有", "无法", "暂不", "人工客服"]}
+{"id": "pay-8", "category": "支付", "question": "可以分期付款吗？", "expect_sources_any": ["payment-installment.md"], "expect_any": ["3", "6", "12", "24"], "expect_transfer": false}
 {"id": "unkb-3", "category": "知识库外", "question": "你们有线下实体店吗？", "expect_any": ["没有", "不支持", "无法", "人工客服", "线上"]}
 {"id": "unkb-4", "category": "知识库外", "question": "能直邮到美国吗？", "expect_any": ["不支持", "没有", "无法", "人工客服", "国内"]}
+
+# ============================================================
+# 九、品类细则（语料扩充后新增：与通用政策并存的专门规则）
+# 这些题的正确来源是品类文件而非通用文件，考「能否找到更精确的那一份」
+# ============================================================
+{"id": "cat-1", "category": "品类细则", "question": "手机拆封了但没开机，能无理由退货吗？", "expect_sources_any": ["returns-3c.md"], "expect_any": ["未激活", "激活"], "expect_transfer": false}
+{"id": "cat-2", "category": "品类细则", "question": "买的水果烂了怎么处理？", "expect_sources_any": ["returns-fresh.md"], "expect_any": ["48小时", "仅退款"], "expect_transfer": false}
+{"id": "cat-3", "category": "品类细则", "question": "内衣可以退货吗？", "expect_sources_any": ["returns-apparel.md", "returns.md"], "expect_any": ["不支持", "贴身"], "expect_transfer": false}
+{"id": "cat-4", "category": "品类细则", "question": "书拆了塑封还能退吗？", "expect_sources_any": ["returns-books.md"], "expect_any": ["塑封", "不支持"], "expect_transfer": false}
+{"id": "cat-5", "category": "品类细则", "question": "买的衣柜不想要了，多少天内可以退？", "expect_sources_any": ["returns-large.md"], "expect_any": ["30天"], "expect_transfer": false}
+{"id": "cat-6", "category": "品类细则", "question": "电子书能退款吗？", "expect_sources_any": ["returns-books.md"], "expect_any": ["不支持", "数字"], "expect_transfer": false}
+
+# ============================================================
+# 十、促销与活动（规则互相冲突，考「抓对场次」）
+# ============================================================
+{"id": "promo-1", "category": "促销活动", "question": "618 的定金付了但尾款忘了付，定金能退吗？", "expect_sources_any": ["promo-618.md", "service-presale.md"], "expect_any": ["不退", "定金"], "expect_transfer": false}
+{"id": "promo-2", "category": "促销活动", "question": "双 11 大促期间多久发货？", "expect_sources_any": ["promo-1111.md"], "expect_any": ["72小时"], "expect_transfer": false}
+{"id": "promo-3", "category": "促销活动", "question": "秒杀抢到的东西能价保吗？", "expect_sources_any": ["promo-seckill.md"], "expect_any": ["不参与", "不支持", "不适用"], "expect_transfer": false}
+{"id": "promo-4", "category": "促销活动", "question": "拼团没凑够人会怎么样？", "expect_sources_any": ["promo-groupbuy.md"], "expect_any": ["自动取消", "退款"], "expect_transfer": false}
+{"id": "promo-5", "category": "促销活动", "question": "预售商品的定金什么情况下能退？", "expect_sources_any": ["service-presale.md", "promo-1111.md", "promo-618.md"], "expect_any": ["商家原因", "不可抗力", "缺货"], "expect_transfer": false}
+
+# ============================================================
+# 十一、券的细分（新人券/品类券/店铺券叠加规则各不相同）
+# ============================================================
+{"id": "coupon-3", "category": "优惠券", "question": "新人券能和满减一起用吗？", "expect_sources_any": ["coupon-newuser.md"], "expect_any": ["不可", "不叠加", "不能"], "expect_transfer": false}
+{"id": "coupon-4", "category": "优惠券", "question": "家电券能抵服饰的钱吗？", "expect_sources_any": ["coupon-category.md"], "expect_any": ["不计入", "仅限", "只能"], "expect_transfer": false}
+{"id": "coupon-5", "category": "优惠券", "question": "店铺券和平台券能一起用吗？", "expect_sources_any": ["coupon-store.md"], "expect_any": ["可叠加", "叠加"], "expect_transfer": false}
+
+# ============================================================
+# 十二、物流细分（时效差异极大：3 小时 / 3-7 天 / 7-15 天）
+# ============================================================
+{"id": "logi-1", "category": "物流", "question": "空调什么时候能上门装？", "expect_sources_any": ["logistics-bulky.md", "aftersale-install.md"], "expect_any": ["预约", "送装"], "expect_transfer": false}
+{"id": "logi-2", "category": "物流", "question": "冷链商品多久能到？", "expect_sources_any": ["logistics-cold.md"], "expect_any": ["48", "72", "次日"], "expect_transfer": false}
+{"id": "logi-3", "category": "物流", "question": "海外直邮要等多久？", "expect_sources_any": ["logistics-crossborder.md"], "expect_any": ["7-15", "7~15", "7至15"], "expect_transfer": false}
+{"id": "logi-4", "category": "物流", "question": "同城能几小时送到？", "expect_sources_any": ["logistics-sameday.md"], "expect_any": ["3小时"], "expect_transfer": false}
+{"id": "logi-5", "category": "物流", "question": "跨境商品为什么要我的身份证？", "expect_sources_any": ["logistics-crossborder.md"], "expect_any": ["清关", "海关"], "expect_transfer": false}
+
+# ============================================================
+# 十三、支付细分
+# ============================================================
+{"id": "pay-4", "category": "支付", "question": "可以分 12 期吗？手续费怎么算？", "expect_sources_any": ["payment-installment.md"], "expect_any": ["手续费"], "expect_transfer": false}
+{"id": "pay-5", "category": "支付", "question": "分期买的能提前还清吗？", "expect_sources_any": ["payment-installment.md"], "expect_any": ["提前", "不予退还", "不退"], "expect_transfer": false}
+{"id": "pay-6", "category": "支付", "question": "我们公司采购能开账期吗？", "expect_sources_any": ["payment-corp.md", "member-enterprise.md"], "expect_any": ["账期"], "expect_transfer": false}
+{"id": "pay-7", "category": "支付", "question": "支付老是被拦截怎么办？", "expect_sources_any": ["payment-fail.md"], "expect_any": ["实名", "风控", "审核"], "expect_transfer": false}
+
+# ============================================================
+# 十四、保修细分（1 年 / 3 年 / 2 年 / 30 天，数字极易混淆）
+# ============================================================
+{"id": "war-3", "category": "保修", "question": "冰箱的压缩机保修几年？", "expect_sources_any": ["warranty-home.md"], "expect_any": ["3年"], "expect_transfer": false}
+{"id": "war-4", "category": "保修", "question": "手机电池保修多久？", "expect_sources_any": ["warranty-3c.md"], "expect_any": ["6个月"], "expect_transfer": false}
+{"id": "war-5", "category": "保修", "question": "实木家具保修几年？", "expect_sources_any": ["warranty-furniture.md"], "expect_any": ["2年"], "expect_transfer": false}
+{"id": "war-6", "category": "保修", "question": "衣服开线了多久之内能找你们？", "expect_sources_any": ["warranty-apparel.md", "returns-apparel.md"], "expect_any": ["30天"], "expect_transfer": false}
+
+# ============================================================
+# 十五、会员细分
+# ============================================================
+{"id": "mem-3", "category": "会员", "question": "PLUS 会员多少钱一年？", "expect_sources_any": ["member-plus.md"], "expect_any": ["149"], "expect_transfer": false}
+{"id": "mem-4", "category": "会员", "question": "PLUS 会员开了没用过能退吗？", "expect_sources_any": ["member-plus.md"], "expect_any": ["7天", "退款"], "expect_transfer": false}
+{"id": "mem-5", "category": "会员", "question": "成长值怎么算？退货会扣吗？", "expect_sources_any": ["member-growth.md"], "expect_any": ["扣减", "扣"], "expect_transfer": false}
+
+# ============================================================
+# 十六、发票与售后
+# ============================================================
+{"id": "inv-1", "category": "发票", "question": "发票抬头写错了能重开吗？", "expect_sources_any": ["invoice-electronic.md"], "expect_any": ["重开", "作废"], "expect_transfer": false}
+{"id": "inv-2", "category": "发票", "question": "开专票需要什么材料？", "expect_sources_any": ["invoice-special.md"], "expect_any": ["纳税人识别号", "营业执照", "资质"], "expect_transfer": false}
+{"id": "inv-3", "category": "发票", "question": "退款了发票要退回去吗？", "expect_sources_any": ["invoice-special.md", "invoice-electronic.md"], "expect_any": ["红字", "作废", "退回"], "expect_transfer": false}
+{"id": "as-1", "category": "售后服务", "question": "延保能补买吗？", "expect_sources_any": ["aftersale-extend.md"], "expect_any": ["30天"], "expect_transfer": false}
+{"id": "as-2", "category": "售后服务", "question": "旧手机能抵扣新手机的钱吗？", "expect_sources_any": ["aftersale-tradein.md"], "expect_any": ["抵扣", "以旧换新"], "expect_transfer": false}
+{"id": "as-3", "category": "售后服务", "question": "安装空调打孔要另外收费吗？", "expect_sources_any": ["aftersale-install.md", "logistics-bulky.md"], "expect_any": ["收费", "打孔"], "expect_transfer": false}
+
+# ============================================================
+# 十七、账号与安全
+# ============================================================
+{"id": "sec-1", "category": "账号", "question": "实名认证的身份证号能改吗？", "expect_sources_any": ["account-realname.md"], "expect_any": ["不可", "不能", "变更"], "expect_transfer": false}
+{"id": "sec-2", "category": "账号", "question": "注销以后我的数据还会留着吗？", "expect_sources_any": ["account-privacy.md", "account.md"], "expect_any": ["删除", "匿名"], "expect_transfer": false}
+{"id": "sec-3", "category": "账号", "question": "有人打电话说我的订单异常要给我理赔，是真的吗？", "expect_sources_any": ["security-antifraud.md", "payment-fail.md"], "expect_any": ["诈骗", "不会", "核实"], "expect_transfer": false}
+
+# ============================================================
+# 十八、价保与预售（与 faq.md 的 7 天价保冲突：细则写的是 15 天）
+# ============================================================
+{"id": "pp-1", "category": "价保", "question": "价保多久之内能申请？", "expect_sources_any": ["service-priceprotect.md", "faq.md"], "expect_any": ["15天", "7天"], "expect_transfer": false}
+{"id": "pp-2", "category": "价保", "question": "用优惠券买的还能价保吗？", "expect_sources_any": ["service-priceprotect.md"], "expect_any": ["优惠券", "实付"], "expect_transfer": false}

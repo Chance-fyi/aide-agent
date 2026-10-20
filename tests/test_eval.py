@@ -54,16 +54,19 @@ def test_real_dataset_is_valid():
     而不是等到跑分时表现为一堆莫名的失败。
     """
     cases = load_cases(DEFAULT_DATASET)
-    assert len(cases) >= 50
+    assert len(cases) >= 90
     assert len({c.id for c in cases}) == len(cases)
     # 每条用例至少要校验点东西，否则它跑通了也没有意义
-    assert all(c.expect_sources or c.expect_points or c.expect_any
-               or c.expect_transfer is not None for c in cases)
+    assert all(c.expect_sources or c.expect_sources_any or c.expect_points
+               or c.expect_any or c.expect_transfer is not None for c in cases)
     # 难度结构必须存在：只有基础题时评估测不出任何改进
     cats = {c.category for c in cases}
-    assert {"同义改写", "易混淆", "多跳", "多轮指代", "知识库外"} <= cats
+    assert {"同义改写", "易混淆", "多跳", "多轮指代", "知识库外", "品类细则"} <= cats
     # 多轮用例必须带 retrieval_query，否则检索校验会被静默跳过
-    assert all(c.retrieval_probe for c in cases if c.history and c.expect_sources)
+    assert all(
+        c.retrieval_probe for c in cases
+        if c.history and (c.expect_sources or c.expect_sources_any)
+    )
 
 def test_loads_fields_and_skips_comments(tmp_path, kb_dir):
     path = _write(tmp_path, [
@@ -110,6 +113,15 @@ def test_missing_question_is_rejected(tmp_path, kb_dir):
     with pytest.raises(DatasetError, match="question"):
         load_cases(path, kb_dir)
 
+def test_sources_any_and_must_be_disjoint(tmp_path, kb_dir):
+    """同一文件既写 AND 又写 OR 只会让期望读不懂，加载就拦。"""
+    path = _write(tmp_path, [{
+        "id": "a", "question": "q",
+        "expect_sources": ["returns.md"], "expect_sources_any": ["returns.md"],
+    }])
+    with pytest.raises(DatasetError, match="同时出现"):
+        load_cases(path, kb_dir)
+
 def test_multiturn_requires_retrieval_query(tmp_path, kb_dir):
     """多轮 + 声明来源 却 不写 retrieval_query：必须报错。
 
@@ -130,11 +142,15 @@ def test_retrieval_probe_selection(tmp_path, kb_dir):
         {"id": "ctx", "question": "多久之内？", "history": ["我想退货"],
          "retrieval_query": "退货期限", "expect_sources": ["returns.md"]},
         {"id": "nocheck", "question": "转人工", "expect_transfer": True},
+        {"id": "anyonly", "question": "保修多久",
+         "expect_sources_any": ["returns.md"]},
     ])
     cases = {c.id: c for c in load_cases(path, kb_dir)}
     assert cases["plain"].retrieval_probe == "怎么退货"
     assert cases["ctx"].retrieval_probe == "退货期限"
     assert cases["nocheck"].retrieval_probe is None
+    # 只写 expect_sources_any 也算校验检索，不能因为没写 AND 就被当成不校验
+    assert cases["anyonly"].retrieval_probe == "保修多久"
 
 # ============================================================
 # 检索层打分
@@ -152,6 +168,37 @@ def test_score_retrieval_hit():
     assert s.hit == ("refund.md",) and s.missed == ("returns.md",)
     # 首条就命中（虽然只命中一半来源），MRR = 1
     assert s.top1_ok is True and s.mrr == 1.0
+
+def test_sources_any_is_or_semantics():
+    """语料扩充后同一问题常有多个权威文件（通用政策 + 品类细则），
+
+    AND-only 会把"命中更精确的品类细则"判成失败——那不是模型错，是期望写错。
+    """
+    case = _case(expect_sources_any=("warranty.md", "warranty-3c.md"))
+    assert score_retrieval(case, ["warranty-3c.md"]).ok is True
+    assert score_retrieval(case, ["warranty.md"]).ok is True
+    s = score_retrieval(case, ["shipping.md"])
+    assert s.ok is False and s.any_ok is False
+
+def test_sources_and_any_combine():
+    """多跳题：AND 全部必中，且 OR 至少一个。"""
+    case = _case(
+        expect_sources=("refund.md",),
+        expect_sources_any=("returns.md", "returns-3c.md"),
+    )
+    assert score_retrieval(case, ["refund.md", "returns-3c.md"]).ok is True
+    # AND 命中但 OR 全未命中
+    s = score_retrieval(case, ["refund.md", "faq.md"])
+    assert s.ok is False and s.any_ok is False and s.missed == ()
+    # OR 命中但 AND 缺失
+    s2 = score_retrieval(case, ["returns.md"])
+    assert s2.ok is False and s2.missed == ("refund.md",) and s2.any_ok is True
+
+def test_mrr_accepts_any_source():
+    """MRR 应把"可接受来源"也算对：否则 OR 用例的排序质量被低估。"""
+    case = _case(expect_sources_any=("a.md", "b.md"))
+    assert score_retrieval(case, ["b.md"]).mrr == 1.0
+    assert score_retrieval(case, ["x.md", "b.md"]).mrr == 0.5
 
 def test_mrr_reflects_rank_of_first_correct_source():
     """召回饱和时 recall 恒为 100%，只能靠排序指标看优化效果。"""
@@ -241,6 +288,40 @@ def test_summary_rates_are_none_when_nothing_checked():
     """检索层-only 跑分时答案率应为 n/a，而不是 0%。"""
     s = summarize([CaseResult(case=_case(), retrieval=RetrievalScore(False, (), ()))])
     assert s.retrieval_rate is None and s.answer_rate is None
+
+def test_audit_flags_outdated_unkb_case(monkeypatch):
+    """「知识库外」用例腐化检测：语料里已有相关内容时应报警。
+
+    这是本步真实踩到的坑——扩语料时加了分期付款说明，
+    原本期望"不支持"的 unkb 用例就静默失效了（模型答对却被判错）。
+    """
+    from app.eval import runner
+
+    cases = [
+        _case(id="stale", category="知识库外", question="可以分期吗？"),
+        _case(id="real", category="知识库外", question="有实体店吗？"),
+        _case(id="biz", category="支付", question="支持什么支付方式"),
+    ]
+
+    def fake_search(q, top_k=1, **kw):
+        # 只有 stale 命中高分；非「知识库外」分类不该被审计到
+        score = 0.74 if q == "可以分期吗？" else 0.48
+        return [{"score": score, "source": "x.md", "h1": "H"}]
+
+    monkeypatch.setattr(runner.store, "search", fake_search)
+    suspects = runner.audit_cases(cases)
+    assert [s["id"] for s in suspects] == ["stale"]
+    assert suspects[0]["score"] == 0.74
+
+def test_audit_threshold_separates_topic_near_miss():
+    """阈值必须能把"真腐化"与"话题相近但没答案"分开。
+
+    实测：真腐化 0.743，假阳性 0.594，真·知识库外 0.477/0.530。
+    阈值落在 0.594~0.743 之间即可；这里锁住这个区间不被随意改动。
+    """
+    from app.eval.runner import AUDIT_SCORE_THRESHOLD as t
+
+    assert 0.594 < t < 0.743
 
 def test_error_is_counted_separately_from_quality():
     """限流/超时造成的无回复也要报失败（不能造假通过），

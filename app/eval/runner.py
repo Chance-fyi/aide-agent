@@ -219,3 +219,56 @@ async def purge_residue() -> int:
     graph = await get_graph()
     await _cleanup(thread_ids, getattr(graph, "checkpointer", None))
     return len(thread_ids)
+
+# ============================================================
+# 黄金集审计
+# ============================================================
+
+# 「知识库外」用例的审计阈值：检索最高分超过它，说明语料里可能已有相关内容，
+# 用例多半已腐化（应该改成正常业务问答）。
+#
+# 0.65 是按当前语料实测校准的：
+#   真腐化（"可以分期付款吗" 命中 payment-installment.md）= 0.743
+#   假阳性（"支持货到付款吗" 只命中支付方式列表）= 0.594
+#   真·知识库外（0.477 / 0.530）
+# 阈值取两者之间：过高漏报腐化，过低会把"话题相近但没答案"误报。
+# 语料大幅变动后应重新校准（跑一次 --audit 看分布）。
+AUDIT_SCORE_THRESHOLD = 0.65
+
+# 声明了"知识库没有相关内容"的分类：语料一扩充就可能静默失效
+AUDIT_CATEGORY = "知识库外"
+
+def audit_cases(cases: list[GoldenCase]) -> list[dict]:
+    """审计「知识库外」用例：语料里是不是已经有内容了。
+
+    为何需要：扩语料时最容易发生的一种腐化——
+    原本挂在「知识库外」的用例（期望"不支持/没有"），
+    因为新加了一份相关文档而失效。它的表现不是报错，而是
+    "模型答对了却被判错"，极难发现（本步真踩到：分期付款）。
+
+    做法：拿问题去检索，看最高分。分数高 = 语料里有像样的内容 = 应人工复核。
+    只提示不自动修改：是否真的腐化要人看语料才能定。
+    """
+    suspects: list[dict] = []
+    for case in cases:
+        if case.category != AUDIT_CATEGORY:
+            continue
+        try:
+            hits = store.search(case.question, top_k=1)
+        except Exception:
+            logger.exception("审计检索失败 case=%s", case.id)
+            continue
+        if not hits:
+            continue
+        top = hits[0]
+        if top["score"] >= AUDIT_SCORE_THRESHOLD:
+            suspects.append(
+                {
+                    "id": case.id,
+                    "question": case.question,
+                    "score": round(top["score"], 3),
+                    "source": top["source"],
+                    "h1": top["h1"],
+                }
+            )
+    return suspects

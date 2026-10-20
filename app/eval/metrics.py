@@ -41,36 +41,46 @@ class RetrievalScore:
     checked: bool
     hit: tuple[str, ...]
     missed: tuple[str, ...]
+    any_ok: bool | None = None    # expect_sources_any 是否至少命中一个
     top1_ok: bool | None = None   # 第一条命中是否就是期望来源
     mrr: float = 0.0              # 第一个正确来源的倒数排名（1.0 = 首条就对）
 
     @property
     def ok(self) -> bool | None:
-        return None if not self.checked else not self.missed
+        if not self.checked:
+            return None
+        return not self.missed and self.any_ok is not False
 
 def score_retrieval(case: GoldenCase, hit_sources: list[str]) -> RetrievalScore:
     """按命中来源打分（hit_sources 必须按相似度降序）。
 
-    判据是"期望文件出现过"（recall 视角），不是"top1 就是它"：
-    父子检索的设计允许多个文件同时命中，且答案可能综合多个来源。
-    但排序质量另用 top1_ok / mrr 记录——
+    判据分两层：
+    - expect_sources：必须**全部**命中（AND）——多跳题真的需要多个文件
+    - expect_sources_any：至少命中**一个**（OR）——通用政策与品类细则均可接受
+    两层同时存在时：AND 全部满足，且 OR 至少一个。
+
+    排序质量另用 top1_ok / mrr 记录——
     这两个才是 rerank、query 改写这类优化真正能推动的指标。
     """
-    if not case.expect_sources:
+    if not (case.expect_sources or case.expect_sources_any):
         return RetrievalScore(checked=False, hit=(), missed=())
     got = set(hit_sources)
     hit = tuple(s for s in case.expect_sources if s in got)
     missed = tuple(s for s in case.expect_sources if s not in got)
-
-    # 第一个命中期望来源的位次 → MRR；一个都没命中则记 0
-    rank = next(
-        (i for i, s in enumerate(hit_sources, start=1) if s in case.expect_sources),
-        None,
+    any_ok = (
+        None
+        if not case.expect_sources_any
+        else any(s in got for s in case.expect_sources_any)
     )
+
+    # 第一个命中"期望或可接受来源"的位次 → MRR；一个都没命中则记 0
+    acceptable = set(case.expect_sources) | set(case.expect_sources_any)
+    rank = next((i for i, s in enumerate(hit_sources, start=1) if s in acceptable), None)
     return RetrievalScore(
         checked=True,
         hit=hit,
         missed=missed,
+        any_ok=any_ok,
         top1_ok=(rank == 1),
         mrr=0.0 if rank is None else 1.0 / rank,
     )

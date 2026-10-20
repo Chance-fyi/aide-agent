@@ -44,6 +44,12 @@ class GoldenCase:
     # 填这里等于标注"改写到位时应该查什么"，既避免误判，也给出 query 改写的目标上限
     retrieval_query: str | None = None
     expect_sources: tuple[str, ...] = ()
+    # 可接受来源的"任一"集合（OR）。
+    # 为何需要：语料扩充后同一问题往往有多个权威文件（通用政策 + 品类细则），
+    # 只有 AND 语义时，检索命中更精确的品类细则反被判失败——
+    # 那不是模型错了，是期望写错了。
+    # 与 expect_sources 同时存在时语义为：必中全部 AND，且任一可接受（OR）
+    expect_sources_any: tuple[str, ...] = ()
     expect_points: tuple[str, ...] = ()
     expect_any: tuple[str, ...] = ()
     expect_transfer: bool | None = None
@@ -51,7 +57,7 @@ class GoldenCase:
     @property
     def retrieval_probe(self) -> str | None:
         """检索层实际拿去查的那句话；None = 该用例不校验检索。"""
-        if not self.expect_sources:
+        if not (self.expect_sources or self.expect_sources_any):
             return None
         if self.retrieval_query:
             return self.retrieval_query
@@ -111,13 +117,19 @@ def load_cases(
             raise DatasetError(f"{where}：缺少 question")
 
         sources = _str_tuple(raw.get("expect_sources"), "expect_sources", where)
-        missing = [s for s in sources if s not in kb_names]
+        sources_any = _str_tuple(raw.get("expect_sources_any"), "expect_sources_any", where)
+        missing = [s for s in (*sources, *sources_any) if s not in kb_names]
         if missing:
             # 来源文件名写错是最常见的腐化形式，直接指出真实文件名提示
             raise DatasetError(
-                f"{where}：expect_sources 中的 {missing} 不在知识库目录 "
+                f"{where}：期望来源中的 {missing} 不在知识库目录 "
                 f"（现有: {sorted(kb_names)}）"
             )
+        if sources and sources_any:
+            overlap = set(sources) & set(sources_any)
+            if overlap:
+                # 同一个文件既写进 AND 又写进 OR，只会让人读不懂期望，直接拦
+                raise DatasetError(f"{where}：{sorted(overlap)} 同时出现在 expect_sources 与 expect_sources_any")
 
         transfer = raw.get("expect_transfer")
         if transfer is not None and not isinstance(transfer, bool):
@@ -131,7 +143,7 @@ def load_cases(
         rq = raw.get("retrieval_query")
         if rq is not None and (not isinstance(rq, str) or not rq.strip()):
             raise DatasetError(f"{where}：retrieval_query 必须是非空字符串")
-        if history and sources and not rq:
+        if history and (sources or sources_any) and not rq:
             # 强制显式：多轮用例的 question 通常带指代词，拿它检索必然不命中，
             # 不写 retrieval_query 就只能静默跳过检索校验——
             # 那种"看起来在校验其实什么都没测"的用例比失败更危险
@@ -148,6 +160,7 @@ def load_cases(
                 history=history,
                 retrieval_query=rq.strip() if rq else None,
                 expect_sources=sources,
+                expect_sources_any=sources_any,
                 expect_points=_str_tuple(raw.get("expect_points"), "expect_points", where),
                 expect_any=_str_tuple(raw.get("expect_any"), "expect_any", where),
                 expect_transfer=transfer,

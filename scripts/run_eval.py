@@ -50,6 +50,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--verbose", action="store_true", help="打印每条用例的答案全文")
     p.add_argument("--purge", action="store_true",
                    help="只清理中断跑分留下的 eval-* 残留（状态表 + Checkpointer 快照），不跑分")
+    p.add_argument("--audit", action="store_true",
+                   help="审计「知识库外」用例是否已腐化（语料里其实已有相关内容）")
     return p.parse_args()
 
 def _print_case(done: int, total: int, r: CaseResult, verbose: bool) -> None:
@@ -59,11 +61,13 @@ def _print_case(done: int, total: int, r: CaseResult, verbose: bool) -> None:
 
     if r.retrieval.checked:
         if r.retrieval.ok:
-            parts.append(f"检索:{','.join(r.retrieval.hit)}")
+            parts.append(f"检索:{','.join(r.retrieval.hit) or '可接受来源'}")
             # 排序质量：命中但首条不对时标出来，这是 rerank 要优化的目标
             parts.append("首条✓" if r.retrieval.top1_ok else f"MRR{r.retrieval.mrr:.2f}")
-        else:
+        elif r.retrieval.missed:
             parts.append(f"检索缺:{','.join(r.retrieval.missed)}")
+        else:
+            parts.append("可接受来源全未命中")
 
     if r.answer is not None:
         a = r.answer
@@ -174,6 +178,22 @@ def main() -> None:
         print("没有匹配的用例", file=sys.stderr)
         sys.exit(2)
 
+    if args.audit:
+        from app.eval.runner import audit_cases
+
+        suspects = audit_cases(cases)
+        total = sum(1 for c in cases if c.category == "知识库外")
+        if not suspects:
+            print(f"审计通过：「知识库外」用例 {total} 条，均未发现语料中已有相关内容")
+            sys.exit(0)
+        print(f"发现 {len(suspects)}/{total} 条「知识库外」用例可疑：")
+        for s in suspects:
+            print(f"  {s['id']:<10} {s['score']:.3f}  {s['source']} / {s['h1']}")
+            print(f"            问题: {s['question']}")
+        print("\n这些用例的问题在语料里能检到像样的内容，很可能已腐化：")
+        print("若新语料确实回答了该问题，应把它改成正常业务问答并给出 expect_sources_any。")
+        sys.exit(1)
+
     mode = "完整链路（检索 + 生成 + 转接）" if args.full else "仅检索层"
     print(f"黄金集: {args.dataset} | 用例 {len(cases)} 条 | 模式: {mode}")
 
@@ -209,6 +229,7 @@ def main() -> None:
                       "retrieval": {"ok": r.retrieval.ok,
                                     "hit": list(r.retrieval.hit),
                                     "missed": list(r.retrieval.missed),
+                                    "any_ok": r.retrieval.any_ok,
                                     "top1_ok": r.retrieval.top1_ok,
                                     "mrr": round(r.retrieval.mrr, 4)},
                       "answer": None if r.answer is None else {
