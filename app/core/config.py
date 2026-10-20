@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     rebuild_smoke_queries: str = "退货,退款,发货"
 
     # ----- 业务参数 -----
+    # 送给 LLM 的上下文窗口：最多携带最近多少轮对话（一轮 = 用户提问 + 回复）。
+    # 为什么需要：Checkpointer 里的 messages 只增不减，不裁剪的话
+    # token 成本随会话长度线性上涨，最终撞上模型上下文上限。
+    # 只裁「送给模型的窗口」，Checkpointer 完整历史保留（审计/坐席查看不丢数据）。
+    # <=0 表示不限制（仅调试用）
     history_max_rounds: int = 10
     retrieval_top_k: int = 3
     # 检索相似度阈值：低于此分数的命中视为"不相关"直接丢弃。

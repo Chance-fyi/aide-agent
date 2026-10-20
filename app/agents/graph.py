@@ -65,6 +65,36 @@ def _last_text_message(messages: list[AnyMessage], msg_type: str) -> AnyMessage 
         None,
     )
 
+def _window_messages(messages: list[AnyMessage], max_rounds: int) -> list[AnyMessage]:
+    """按「轮」截取最近 max_rounds 轮对话，返回可发给 LLM 的消息窗口。
+
+    为什么需要：Checkpointer 里的 messages 只增不减，长会话每轮都把全部
+    历史送给 LLM，token 成本线性上涨，迟早撞上模型上下文上限。
+
+    为什么在「human 消息边界」切：一轮 = 一条用户消息 + 其后的 agent/tool
+    往返。从 human 边界开窗能保证：
+    1. 窗口首条是 HumanMessage，模型不会看到“没头没尾”的对话
+    2. 绝不出现孤立的 ToolMessage——tool_calls 与 ToolMessage 必须成对，
+       截在中间会让 [OI] 兼容接口直接 400
+
+    max_rounds <= 0 表示不限制（调试时想看全量历史）。
+
+    注意：这里只裁剪「送给模型的窗口」，不改 state。
+    Checkpointer 保留完整历史，坐席端查看、事后审计都不丢数据。
+    """
+    if max_rounds <= 0:
+        return list(messages)
+
+    # 从后往前数 human 消息：第 max_rounds 个的位置即窗口起点
+    seen = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].type == "human":
+            seen += 1
+            if seen == max_rounds:
+                return list(messages[i:])
+    # 轮数不足上限：全量送出
+    return list(messages)
+
 # ============================================================
 # 工具定义
 # ============================================================
@@ -219,9 +249,20 @@ def _make_agent_node():
     """
     llm_with_tools = get_llm().bind_tools(_TOOLS)
 
-    def agent_node(state: AgentState):
+    def agent_node(state: AgentState, config: RunnableConfig):
+        # 上下文窗口：只把最近 N 轮发给模型（state 里的完整历史不动）。
+        # 裁剪放在调用前而非写回 state，是为了不丢审计数据
+        window = _window_messages(state["messages"], get_settings().history_max_rounds)
+        if len(window) < len(state["messages"]):
+            # 记日志才能验证成本控制真的生效（否则只能看账单猜）
+            logger.info(
+                "上下文已裁剪 thread=%s %d→%d 条消息",
+                config["configurable"]["thread_id"],
+                len(state["messages"]),
+                len(window),
+            )
         # 每次都在消息最前面注入系统提示（系统提示不进历史，避免 Checkpointer 里膨胀）
-        messages = [SystemMessage(content=_SYSTEM_PROMPT)] + state["messages"]
+        messages = [SystemMessage(content=_SYSTEM_PROMPT), *window]
         return {"messages": [llm_with_tools.invoke(messages)]}
 
     return agent_node
