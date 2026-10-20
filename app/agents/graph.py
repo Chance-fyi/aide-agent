@@ -20,7 +20,7 @@
 """
 
 import logging
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -29,7 +29,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from app.agents import handoff
+from app.agents import handoff, summarize
 from app.core.config import get_settings
 from app.core.llm import get_llm
 
@@ -85,15 +85,9 @@ def _window_messages(messages: list[AnyMessage], max_rounds: int) -> list[AnyMes
     if max_rounds <= 0:
         return list(messages)
 
-    # 从后往前数 human 消息：第 max_rounds 个的位置即窗口起点
-    seen = 0
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].type == "human":
-            seen += 1
-            if seen == max_rounds:
-                return list(messages[i:])
-    # 轮数不足上限：全量送出
-    return list(messages)
+    # 边界计算与压缩模块共用同一套语义（human 消息边界），避免两处漂移
+    start = summarize.window_start_index(messages, max_rounds)
+    return list(messages[start:])
 
 # ============================================================
 # 工具定义
@@ -191,9 +185,17 @@ class AgentState(TypedDict):
 
     messages 用 add_messages reducer：新消息**追加**而非覆盖，
     这是多轮对话记忆的基础。
+
+    summary / summarized_count 是本轮之外新增的“压缩车道”：
+    - summary：已经滑出窗口的旧对话压成的摘要（空串=还没压过）
+    - summarized_count：已压进摘要的消息条数（水位线）
+    messages 本身**永不删减**，完整历史留在 Checkpointer 供审计与坐席查看。
     """
 
     messages: Annotated[list[AnyMessage], add_messages]
+    # NotRequired：老调用方（含现有测试）只传 messages 也不会校验失败
+    summary: NotRequired[str]
+    summarized_count: NotRequired[int]
 
 
 # ============================================================
@@ -250,20 +252,41 @@ def _make_agent_node():
     llm_with_tools = get_llm().bind_tools(_TOOLS)
 
     def agent_node(state: AgentState, config: RunnableConfig):
-        # 上下文窗口：只把最近 N 轮发给模型（state 里的完整历史不动）。
-        # 裁剪放在调用前而非写回 state，是为了不丢审计数据
-        window = _window_messages(state["messages"], get_settings().history_max_rounds)
-        if len(window) < len(state["messages"]):
+        settings = get_settings()
+        history = state["messages"]
+
+        # 第一步：把“已滑出窗口且未压缩”的旧对话压成摘要。
+        # 压缩失败会原样返回旧摘要与旧水位线（降级为纯窗口裁剪），
+        # 所以这一步不会阻断对话
+        outcome = summarize.advance_summary(
+            history,
+            state.get("summary", ""),
+            state.get("summarized_count", 0),
+            max_rounds=settings.history_max_rounds,
+            trigger_rounds=settings.summary_trigger_rounds,
+            max_chars=settings.summary_max_chars,
+        )
+
+        # 第二步：取最近 N 轮作为逐字窗口（state 里的完整历史不动）
+        window = _window_messages(history, settings.history_max_rounds)
+        if len(window) < len(history):
             # 记日志才能验证成本控制真的生效（否则只能看账单猜）
             logger.info(
                 "上下文已裁剪 thread=%s %d→%d 条消息",
                 config["configurable"]["thread_id"],
-                len(state["messages"]),
+                len(history),
                 len(window),
             )
-        # 每次都在消息最前面注入系统提示（系统提示不进历史，避免 Checkpointer 里膨胀）
-        messages = [SystemMessage(content=_SYSTEM_PROMPT), *window]
-        return {"messages": [llm_with_tools.invoke(messages)]}
+
+        # 第三步：系统提示 + 摘要合并成一条 system（部分厂商只接受单条）
+        system = summarize.build_system_content(_SYSTEM_PROMPT, outcome.summary)
+        messages = [SystemMessage(content=system), *window]
+        return {
+            "messages": [llm_with_tools.invoke(messages)],
+            # 只回写压缩车道，messages 不动
+            "summary": outcome.summary,
+            "summarized_count": outcome.summarized_count,
+        }
 
     return agent_node
 
