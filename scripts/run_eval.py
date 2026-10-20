@@ -42,6 +42,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--category", default="", help="只跑指定分类")
     p.add_argument("--limit", type=int, default=0, help="只跑前 N 条")
     p.add_argument("--top-k", type=int, default=0, help="检索 top_k（默认取配置）")
+    p.add_argument("--sweep", default="",
+                   help="多档 top_k 对比（如 1,3,5），仅检索层；用来看排序质量的真实水平")
     p.add_argument("--delay", type=float, default=0.0,
                    help="用例间隔秒数（带限流的 LLM 厂商下建议设 6~7，避免成片 429）")
     p.add_argument("--json", default="", help="结果落盘路径（JSON）")
@@ -58,6 +60,8 @@ def _print_case(done: int, total: int, r: CaseResult, verbose: bool) -> None:
     if r.retrieval.checked:
         if r.retrieval.ok:
             parts.append(f"检索:{','.join(r.retrieval.hit)}")
+            # 排序质量：命中但首条不对时标出来，这是 rerank 要优化的目标
+            parts.append("首条✓" if r.retrieval.top1_ok else f"MRR{r.retrieval.mrr:.2f}")
         else:
             parts.append(f"检索缺:{','.join(r.retrieval.missed)}")
 
@@ -77,6 +81,33 @@ def _print_case(done: int, total: int, r: CaseResult, verbose: bool) -> None:
     if verbose and r.answer is not None and r.answer.answer:
         for line in r.answer.answer.splitlines():
             print(f"        │ {line}")
+
+def _run_sweep(cases, ks: list[int]) -> None:
+    """多档 top_k 对比表。
+
+    为何需要：语料小的时候 recall 很快饱和（top_k=3 就已经 100%），
+    于是“命中率”这个指标对 rerank / query 改写完全不敏感。
+    扫一遍 top_k 才能看出真实排序水平：
+    top_k=1 的命中率就是“检索器首推多准”，这才是优化要推动的数。
+    """
+    rows = []
+    for k in ks:
+        results = run_retrieval(cases, top_k=k)
+        rows.append((k, summarize(results)))
+
+    print(f"\n{'top_k':>6} {'命中率':>10} {'首条命中':>10} {'MRR':>8}")
+    print("-" * 38)
+    for k, s in rows:
+        hit = "n/a" if s.retrieval_rate is None else f"{s.retrieval_rate * 100:.1f}%"
+        top1 = "n/a" if s.top1_rate is None else f"{s.top1_rate * 100:.1f}%"
+        mrr = "n/a" if s.mrr is None else f"{s.mrr:.3f}"
+        print(f"{k:>6} {hit:>10} {top1:>10} {mrr:>8}")
+    print("-" * 38)
+    # 首条命中率不随 top_k 变化：它就是 top_k=1 的命中率，
+    # 若两者相等，说明排序前几名对 rerank 已无优化空间
+    print("提示：首条命中率与 top_k 无关（它就是 top_k=1 的命中率）。")
+    print("      若 top_k=1 命中率明显低于 top_k=3，说明召回得回来但排不准——")
+    print("      这正是 rerank / query 改写能发挥的空间。")
 
 async def _run(args, cases):
     """跑分主流程：所有异步资源在同一事件循环里创建与释放。
@@ -144,7 +175,24 @@ def main() -> None:
         sys.exit(2)
 
     mode = "完整链路（检索 + 生成 + 转接）" if args.full else "仅检索层"
-    print(f"黄金集: {args.dataset} | 用例 {len(cases)} 条 | 模式: {mode}\n")
+    print(f"黄金集: {args.dataset} | 用例 {len(cases)} 条 | 模式: {mode}")
+
+    if args.sweep:
+        if args.full:
+            print("--sweep 仅支持检索层（不要与 --full 同时用）", file=sys.stderr)
+            sys.exit(2)
+        try:
+            ks = sorted({int(x) for x in args.sweep.split(",") if x.strip()})
+        except ValueError:
+            print(f"--sweep 格式错误: {args.sweep}（示例: 1,3,5）", file=sys.stderr)
+            sys.exit(2)
+        if not ks or any(k < 1 for k in ks):
+            print("--sweep 必须是正整数列表", file=sys.stderr)
+            sys.exit(2)
+        _run_sweep(cases, ks)
+        sys.exit(0)
+
+    print()
 
     results = asyncio.run(_run(args, cases))
     summary = summarize(results)
@@ -160,7 +208,9 @@ def main() -> None:
                       "error": r.error,
                       "retrieval": {"ok": r.retrieval.ok,
                                     "hit": list(r.retrieval.hit),
-                                    "missed": list(r.retrieval.missed)},
+                                    "missed": list(r.retrieval.missed),
+                                    "top1_ok": r.retrieval.top1_ok,
+                                    "mrr": round(r.retrieval.mrr, 4)},
                       "answer": None if r.answer is None else {
                           "ok": r.answer.ok,
                           "missing": list(r.answer.missing),

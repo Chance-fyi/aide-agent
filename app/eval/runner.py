@@ -58,13 +58,14 @@ def run_retrieval(
     results: list[CaseResult] = []
 
     for i, case in enumerate(cases, start=1):
-        try:
-            hits = store.search(case.question, top_k=k)
-            sources = [h["source"] for h in hits]
-        except Exception:
-            # 单条检索失败不中断整轮评估：记为"未命中"，跑完再统一看
-            logger.exception("检索失败 case=%s", case.id)
-            sources = []
+        probe = case.retrieval_probe
+        sources: list[str] = []
+        if probe is not None:
+            try:
+                sources = [h["source"] for h in store.search(probe, top_k=k)]
+            except Exception:
+                # 单条检索失败不中断整轮评估：记为"未命中"，跑完再统一看
+                logger.exception("检索失败 case=%s", case.id)
         r = CaseResult(case=case, retrieval=score_retrieval(case, sources))
         results.append(r)
         _notify(on_progress, i, len(cases), r)
@@ -144,18 +145,26 @@ async def run_full(
 
             # 检索层先跑、单独 try：LLM 挂了不该把"检索没命中"也算进去，
             # 否则两层分开统计的归因能力就失效了
-            try:
-                sources = [h["source"] for h in store.search(case.question)]
-            except Exception:
-                logger.exception("检索失败 case=%s", case.id)
-                sources = []
+            sources: list[str] = []
+            probe = case.retrieval_probe
+            if probe is not None:
+                try:
+                    sources = [h["source"] for h in store.search(probe)]
+                except Exception:
+                    logger.exception("检索失败 case=%s", case.id)
 
             answer: str | None = None
             error: str | None = None
+            config = {"configurable": {"thread_id": tid}}
             try:
+                # 多轮用例：先按序重放历史发言，让 Checkpointer 攒出上下文，
+                # 最后一句才是被评估的问题
+                for prior in case.history:
+                    await graph.ainvoke(
+                        {"messages": [HumanMessage(content=prior)]}, config
+                    )
                 result = await graph.ainvoke(
-                    {"messages": [HumanMessage(content=case.question)]},
-                    {"configurable": {"thread_id": tid}},
+                    {"messages": [HumanMessage(content=case.question)]}, config
                 )
                 answer = _extract_answer(result)
             except Exception as exc:

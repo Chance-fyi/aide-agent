@@ -1,3 +1,15 @@
+# 黄金问答集（golden set）
+#
+# 一行一个 JSON，字段说明见 docs/step-32.md 与 docs/step-33.md。
+# 分组注释只为人读，加载时会跳过 # 开头的行。
+#
+# 设计原则：题目要"难到能测出改进"。
+# 只问知识库原词（"退货政策是什么"）时，向量检索躺着也能命中，
+# 于是无论加 rerank 还是加 query 改写，分数都是 100%，评估就失去了意义。
+
+# ============================================================
+# 一、基础题（贴近知识库原词，作为回归基线）
+# ============================================================
 {"id": "returns-1", "category": "退货", "question": "我买的东西不想要了，签收 5 天了还能退吗？", "expect_sources": ["returns.md"], "expect_points": ["7天", "无理由"], "expect_transfer": false}
 {"id": "returns-2", "category": "退货", "question": "退货的运费谁承担？", "expect_sources": ["returns.md"], "expect_points": ["质量问题", "商家承担"], "expect_transfer": false}
 {"id": "returns-3", "category": "退货", "question": "定制的商品可以无理由退货吗？", "expect_sources": ["returns.md"], "expect_points": ["不支持"], "expect_transfer": false}
@@ -23,8 +35,67 @@
 {"id": "faq-1", "category": "常见问题", "question": "怎么修改收货地址？", "expect_sources": ["faq.md"], "expect_points": ["待发货"], "expect_transfer": false}
 {"id": "faq-2", "category": "常见问题", "question": "商品刚买就降价了，能补差价吗？", "expect_sources": ["faq.md"], "expect_points": ["价格保护"], "expect_transfer": false}
 {"id": "faq-3", "category": "常见问题", "question": "预售商品一直不发货怎么办？", "expect_sources": ["faq.md"], "expect_points": ["全额退款"], "expect_transfer": false}
+
+# ============================================================
+# 二、同义改写（用户真实说法，不含知识库原词）
+# 考的是 embedding 泛化能力：说法越口语，纯向量检索越容易漏
+# ============================================================
+{"id": "para-1", "category": "同义改写", "question": "东西到手了发现不合心意，多久之内能反悔？", "expect_sources": ["returns.md"], "expect_any": ["7天"], "expect_transfer": false}
+{"id": "para-2", "category": "同义改写", "question": "包装拆了还能不能退？", "expect_sources": ["returns.md"], "expect_any": ["未使用", "不影响二次销售"], "expect_transfer": false}
+{"id": "para-3", "category": "同义改写", "question": "我不想要了寄回去的邮费是我出还是你们出？", "expect_sources": ["returns.md"], "expect_any": ["买家", "自行承担"], "expect_transfer": false}
+{"id": "para-4", "category": "同义改写", "question": "积分能当钱花吗？", "expect_sources": ["membership.md"], "expect_any": ["抵扣"], "expect_transfer": false}
+{"id": "para-5", "category": "同义改写", "question": "买贵了能退我差价吗？", "expect_sources": ["faq.md"], "expect_any": ["价格保护", "差价"], "expect_transfer": false}
+{"id": "para-6", "category": "同义改写", "question": "发票能不能开成我们公司的抬头？", "expect_sources": ["payment.md"], "expect_any": ["增值税", "专用发票", "抬头"], "expect_transfer": false}
+{"id": "para-7", "category": "同义改写", "question": "快递一直不动好几天了怎么办？", "expect_sources": ["shipping.md"], "expect_any": ["核查", "客服"], "expect_transfer": false}
+{"id": "para-8", "category": "同义改写", "question": "东西摔坏了还在保修里吗？", "expect_sources": ["warranty.md"], "expect_any": ["人为损坏", "付费维修"], "expect_transfer": false}
+
+# ============================================================
+# 三、易混淆（相邻政策的数字/责任方不同）
+# 退货 7 天 vs 换货 15 天；退货邮费 vs 换货运费；保修期 vs 退货期
+# 这类题考的是"检索是否抓对文件"——抓错了 LLM 会一本正经答错
+# ============================================================
+{"id": "conf-1", "category": "易混淆", "question": "质量问题想换一个新的，超过一周了还能换吗？", "expect_sources": ["exchange.md"], "expect_any": ["15天"], "expect_transfer": false}
+{"id": "conf-2", "category": "易混淆", "question": "无理由退货是几天内？", "expect_sources": ["returns.md"], "expect_any": ["7天"], "expect_transfer": false}
+{"id": "conf-3", "category": "易混淆", "question": "质量问题换货，我寄过去的运费能报销吗？", "expect_sources": ["exchange.md"], "expect_any": ["商家承担", "返还", "垫付"], "expect_transfer": false}
+{"id": "conf-4", "category": "易混淆", "question": "数码家电的保修期是多久？", "expect_sources": ["warranty.md"], "expect_any": ["1年"], "expect_transfer": false}
+{"id": "conf-5", "category": "易混淆", "question": "待发货的订单能取消吗？取消后钱怎么退？", "expect_sources": ["faq.md", "refund.md"], "expect_any": ["1-3", "1~3", "1至3"], "expect_transfer": false}
+
+# ============================================================
+# 四、多跳（一条回答需要综合两个文件）
+# 单文件召回不够用：只命中其中一个就会答半截
+# ============================================================
+{"id": "multi-1", "category": "多跳", "question": "退货寄回去以后，钱多久能退到我的银行卡里？", "expect_sources": ["returns.md", "refund.md"], "expect_any": ["3-7", "3~7", "3至7", "3到7"], "expect_transfer": false}
+{"id": "multi-2", "category": "多跳", "question": "用了优惠券的订单退货了，券会还给我吗？钱怎么退？", "expect_sources": ["coupons.md"], "expect_any": ["返还", "有效期"], "expect_transfer": false}
+{"id": "multi-3", "category": "多跳", "question": "换货的商品你们收到后多久能发新的？", "expect_sources": ["exchange.md"], "expect_any": ["3个工作日", "3 个工作日"], "expect_transfer": false}
+
+# ============================================================
+# 五、多轮指代（history 里给出前文，question 带指代词）
+# 检索用 retrieval_query（改写后的意图）来校验，这是 query 改写的目标上限
+# ============================================================
+{"id": "ctx-1", "category": "多轮指代", "history": ["我想退货"], "question": "多久之内可以？", "retrieval_query": "退货多久之内可以申请", "expect_sources": ["returns.md"], "expect_any": ["7天"], "expect_transfer": false}
+{"id": "ctx-2", "category": "多轮指代", "history": ["我的订单还没发货"], "question": "那能直接退钱吗？", "retrieval_query": "未发货订单可以仅退款吗", "expect_sources": ["refund.md"], "expect_any": ["未发货", "仅退款"], "expect_transfer": false}
+{"id": "ctx-3", "category": "多轮指代", "history": ["我是金卡会员"], "question": "那我买东西打几折？", "retrieval_query": "金卡会员享受什么折扣", "expect_sources": ["membership.md"], "expect_any": ["92"], "expect_transfer": false}
+{"id": "ctx-4", "category": "多轮指代", "history": ["刚买的手机坏了"], "question": "那修要花钱吗？", "retrieval_query": "手机保修期内维修是否收费", "expect_sources": ["warranty.md"], "expect_any": ["免费", "保修范围"], "expect_transfer": false}
+
+# ============================================================
+# 六、转人工（规则兜底 + LLM 自主判断两条路径都要覆盖）
+# ============================================================
 {"id": "handoff-1", "category": "转人工", "question": "我要投诉，你们客服态度太差了！", "expect_transfer": true}
 {"id": "handoff-2", "category": "转人工", "question": "转人工", "expect_transfer": true}
+{"id": "handoff-3", "category": "转人工", "question": "我要人工客服，机器人说不明白", "expect_transfer": true}
+
+# ============================================================
+# 七、超范围（应礼貌拒绝并引导回业务，不许硬答）
+# ============================================================
 {"id": "outofscope-1", "category": "超范围", "question": "帮我写一段 Python 快速排序代码", "expect_any": ["售前", "售后", "帮不了", "无法", "抱歉", "不能"], "expect_transfer": false}
 {"id": "outofscope-2", "category": "超范围", "question": "今天天气怎么样？", "expect_any": ["售前", "售后", "帮不了", "无法", "抱歉", "不能"], "expect_transfer": false}
+{"id": "outofscope-3", "category": "超范围", "question": "我最近心情不好，能陪我聊聊吗", "expect_any": ["售前", "售后", "帮不了", "无法", "抱歉", "不能"], "expect_transfer": false}
+
+# ============================================================
+# 八、知识库外（资料里没有 = 不许编，这是幻觉的主要出口）
+# 这些题检索可能命中相邻文件，但答案必须坦诚说没有
+# ============================================================
 {"id": "unkb-1", "category": "知识库外", "question": "你们支持货到付款吗？", "expect_any": ["不支持", "没有", "无法", "暂不", "人工客服"]}
+{"id": "unkb-2", "category": "知识库外", "question": "可以分期付款吗？", "expect_any": ["不支持", "没有", "无法", "暂不", "人工客服"]}
+{"id": "unkb-3", "category": "知识库外", "question": "你们有线下实体店吗？", "expect_any": ["没有", "不支持", "无法", "人工客服", "线上"]}
+{"id": "unkb-4", "category": "知识库外", "question": "能直邮到美国吗？", "expect_any": ["不支持", "没有", "无法", "人工客服", "国内"]}

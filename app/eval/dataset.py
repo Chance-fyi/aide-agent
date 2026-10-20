@@ -28,15 +28,35 @@ class GoldenCase:
     - expect_sources：检索层。期望命中的知识库文件（校验"找得准不准"）
     - expect_points / expect_any：生成层。答案必须包含 / 至少包含其一
     - expect_transfer：生成层。是否应当转人工；None 表示不校验
+
+    多轮用例（history 非空）额外需要 retrieval_query，见字段说明。
     """
 
     id: str
     question: str
     category: str = "未分类"
+    # 本轮之前用户说过的内容（多轮指代用例）：按序重放后才会问 question。
+    # 为什么单独存："那它能退吗" 这类追问离开上下文就毫无意义，
+    # 必须把指代链完整交给 Agent，才能测出"多轮理解"是否成立
+    history: tuple[str, ...] = ()
+    # 检索层应当用哪句话去查（覆盖默认用 question 检索）。
+    # 多轮用例里 question 含指代词（"那它能退吗"），直接拿它检索必然不命中；
+    # 填这里等于标注"改写到位时应该查什么"，既避免误判，也给出 query 改写的目标上限
+    retrieval_query: str | None = None
     expect_sources: tuple[str, ...] = ()
     expect_points: tuple[str, ...] = ()
     expect_any: tuple[str, ...] = ()
     expect_transfer: bool | None = None
+
+    @property
+    def retrieval_probe(self) -> str | None:
+        """检索层实际拿去查的那句话；None = 该用例不校验检索。"""
+        if not self.expect_sources:
+            return None
+        if self.retrieval_query:
+            return self.retrieval_query
+        # 无多轮上下文时，原问题就是检索 query
+        return None if self.history else self.question
 
 def _str_tuple(raw: object, field: str, where: str) -> tuple[str, ...]:
     """把 JSON 里的数组字段规整成字符串元组，类型不对直接报错。"""
@@ -107,11 +127,26 @@ def load_cases(
         if not isinstance(category, str):
             raise DatasetError(f"{where}：category 必须是字符串")
 
+        history = _str_tuple(raw.get("history"), "history", where)
+        rq = raw.get("retrieval_query")
+        if rq is not None and (not isinstance(rq, str) or not rq.strip()):
+            raise DatasetError(f"{where}：retrieval_query 必须是非空字符串")
+        if history and sources and not rq:
+            # 强制显式：多轮用例的 question 通常带指代词，拿它检索必然不命中，
+            # 不写 retrieval_query 就只能静默跳过检索校验——
+            # 那种"看起来在校验其实什么都没测"的用例比失败更危险
+            raise DatasetError(
+                f"{where}：多轮用例（history 非空）若声明 expect_sources，"
+                "必须同时给出 retrieval_query（改写后应当去查的那句话）"
+            )
+
         cases.append(
             GoldenCase(
                 id=cid.strip(),
                 question=question.strip(),
                 category=category.strip(),
+                history=history,
+                retrieval_query=rq.strip() if rq else None,
                 expect_sources=sources,
                 expect_points=_str_tuple(raw.get("expect_points"), "expect_points", where),
                 expect_any=_str_tuple(raw.get("expect_any"), "expect_any", where),

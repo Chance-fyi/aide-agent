@@ -54,11 +54,16 @@ def test_real_dataset_is_valid():
     而不是等到跑分时表现为一堆莫名的失败。
     """
     cases = load_cases(DEFAULT_DATASET)
-    assert len(cases) >= 20
+    assert len(cases) >= 50
     assert len({c.id for c in cases}) == len(cases)
     # 每条用例至少要校验点东西，否则它跑通了也没有意义
     assert all(c.expect_sources or c.expect_points or c.expect_any
                or c.expect_transfer is not None for c in cases)
+    # 难度结构必须存在：只有基础题时评估测不出任何改进
+    cats = {c.category for c in cases}
+    assert {"同义改写", "易混淆", "多跳", "多轮指代", "知识库外"} <= cats
+    # 多轮用例必须带 retrieval_query，否则检索校验会被静默跳过
+    assert all(c.retrieval_probe for c in cases if c.history and c.expect_sources)
 
 def test_loads_fields_and_skips_comments(tmp_path, kb_dir):
     path = _write(tmp_path, [
@@ -105,6 +110,32 @@ def test_missing_question_is_rejected(tmp_path, kb_dir):
     with pytest.raises(DatasetError, match="question"):
         load_cases(path, kb_dir)
 
+def test_multiturn_requires_retrieval_query(tmp_path, kb_dir):
+    """多轮 + 声明来源 却 不写 retrieval_query：必须报错。
+
+    否则检索层只能静默跳过——"看起来在校验其实什么都没测"的用例
+    比失败的用例更危险。
+    """
+    path = _write(tmp_path, [{
+        "id": "a", "question": "多久之内可以？", "history": ["我想退货"],
+        "expect_sources": ["returns.md"],
+    }])
+    with pytest.raises(DatasetError, match="retrieval_query"):
+        load_cases(path, kb_dir)
+
+def test_retrieval_probe_selection(tmp_path, kb_dir):
+    """检索 probe 的三种情形：改写句 > 原问题 > 不校验。"""
+    path = _write(tmp_path, [
+        {"id": "plain", "question": "怎么退货", "expect_sources": ["returns.md"]},
+        {"id": "ctx", "question": "多久之内？", "history": ["我想退货"],
+         "retrieval_query": "退货期限", "expect_sources": ["returns.md"]},
+        {"id": "nocheck", "question": "转人工", "expect_transfer": True},
+    ])
+    cases = {c.id: c for c in load_cases(path, kb_dir)}
+    assert cases["plain"].retrieval_probe == "怎么退货"
+    assert cases["ctx"].retrieval_probe == "退货期限"
+    assert cases["nocheck"].retrieval_probe is None
+
 # ============================================================
 # 检索层打分
 # ============================================================
@@ -119,6 +150,19 @@ def test_score_retrieval_hit():
     s = score_retrieval(case, ["refund.md", "shipping.md"])
     assert s.checked is True and s.ok is False
     assert s.hit == ("refund.md",) and s.missed == ("returns.md",)
+    # 首条就命中（虽然只命中一半来源），MRR = 1
+    assert s.top1_ok is True and s.mrr == 1.0
+
+def test_mrr_reflects_rank_of_first_correct_source():
+    """召回饱和时 recall 恒为 100%，只能靠排序指标看优化效果。"""
+    case = _case(expect_sources=("returns.md",))
+    assert score_retrieval(case, ["returns.md"]).mrr == 1.0
+    s2 = score_retrieval(case, ["faq.md", "returns.md"])
+    assert s2.ok is True and s2.top1_ok is False and s2.mrr == 0.5
+    s3 = score_retrieval(case, ["faq.md", "refund.md", "returns.md"])
+    assert s3.top1_ok is False and round(s3.mrr, 4) == 0.3333
+    # 完全没命中：MRR 记 0
+    assert score_retrieval(case, ["faq.md"]).mrr == 0.0
 
 def test_score_retrieval_unchecked_when_no_expectation():
     """转人工/超范围用例不校验检索，不能计入分母拉低命中率。"""
@@ -164,12 +208,12 @@ def test_missing_answer_always_fails():
 def test_summary_counts_layers_and_transfer_errors():
     hit = CaseResult(
         case=_case(id="ok", expect_sources=("returns.md",), expect_points=("7天",)),
-        retrieval=RetrievalScore(checked=True, hit=("returns.md",), missed=()),
+        retrieval=score_retrieval(_case(id="ok", expect_sources=("returns.md",)), ["returns.md"]),
         answer=score_answer(_case(id="ok", expect_points=("7天",)), "7天内可退", False),
     )
     miss = CaseResult(
         case=_case(id="miss", expect_sources=("refund.md",)),
-        retrieval=RetrievalScore(checked=True, hit=(), missed=("refund.md",)),
+        retrieval=score_retrieval(_case(id="miss", expect_sources=("refund.md",)), ["faq.md"]),
     )
     false_t = CaseResult(
         case=_case(id="ft", expect_transfer=False),
@@ -186,6 +230,8 @@ def test_summary_counts_layers_and_transfer_errors():
     assert s.total == 4
     # 分母只算"校验过的"：4 条里只有 2 条校验了检索 / 3 条校验了答案
     assert (s.retrieval_checked, s.retrieval_hit) == (2, 1)
+    # hit 用例首条就命中；miss 用例完全没命中 → 首条命中 1 条，MRR = 1/2
+    assert (s.retrieval_top1, s.mrr) == (1, 0.5)
     assert (s.answer_checked, s.answer_passed) == (3, 1)
     assert (s.false_transfer, s.missed_transfer) == (1, 1)
     assert s.failed_ids == ["miss", "ft", "mt"]

@@ -32,29 +32,48 @@ class RetrievalScore:
 
     checked=False 表示该用例不校验检索（如转人工、超范围用例，
     本就不该命中知识库）。
+
+    top1_ok / mrr 是针对"召回饱和"补的两个排序指标：
+    语料只有 31 个块时，top_k=3 几乎总能覆盖到目标文件，
+    只看 recall 永远 100%，加 rerank 也测不出收益。
     """
 
     checked: bool
     hit: tuple[str, ...]
     missed: tuple[str, ...]
+    top1_ok: bool | None = None   # 第一条命中是否就是期望来源
+    mrr: float = 0.0              # 第一个正确来源的倒数排名（1.0 = 首条就对）
 
     @property
     def ok(self) -> bool | None:
         return None if not self.checked else not self.missed
 
 def score_retrieval(case: GoldenCase, hit_sources: list[str]) -> RetrievalScore:
-    """按命中来源打分。
+    """按命中来源打分（hit_sources 必须按相似度降序）。
 
     判据是"期望文件出现过"（recall 视角），不是"top1 就是它"：
     父子检索的设计允许多个文件同时命中，且答案可能综合多个来源。
-    排序质量另看分数分布，不在这里卡。
+    但排序质量另用 top1_ok / mrr 记录——
+    这两个才是 rerank、query 改写这类优化真正能推动的指标。
     """
     if not case.expect_sources:
         return RetrievalScore(checked=False, hit=(), missed=())
     got = set(hit_sources)
     hit = tuple(s for s in case.expect_sources if s in got)
     missed = tuple(s for s in case.expect_sources if s not in got)
-    return RetrievalScore(checked=True, hit=hit, missed=missed)
+
+    # 第一个命中期望来源的位次 → MRR；一个都没命中则记 0
+    rank = next(
+        (i for i, s in enumerate(hit_sources, start=1) if s in case.expect_sources),
+        None,
+    )
+    return RetrievalScore(
+        checked=True,
+        hit=hit,
+        missed=missed,
+        top1_ok=(rank == 1),
+        mrr=0.0 if rank is None else 1.0 / rank,
+    )
 
 # ============================================================
 # 生成层
@@ -139,6 +158,8 @@ class Summary:
     total: int = 0
     retrieval_checked: int = 0
     retrieval_hit: int = 0
+    retrieval_top1: int = 0     # 首条命中数（排序质量）
+    retrieval_mrr: float = 0.0  # MRR 累加，汇总时除以 retrieval_checked
     answer_checked: int = 0
     answer_passed: int = 0
     false_transfer: int = 0    # 不该转却转了
@@ -153,6 +174,14 @@ class Summary:
         return None if not self.retrieval_checked else self.retrieval_hit / self.retrieval_checked
 
     @property
+    def top1_rate(self) -> float | None:
+        return None if not self.retrieval_checked else self.retrieval_top1 / self.retrieval_checked
+
+    @property
+    def mrr(self) -> float | None:
+        return None if not self.retrieval_checked else self.retrieval_mrr / self.retrieval_checked
+
+    @property
     def answer_rate(self) -> float | None:
         return None if not self.answer_checked else self.answer_passed / self.answer_checked
 
@@ -164,6 +193,9 @@ class Summary:
                 "checked": self.retrieval_checked,
                 "hit": self.retrieval_hit,
                 "rate": self.retrieval_rate,
+                "top1": self.retrieval_top1,
+                "top1_rate": self.top1_rate,
+                "mrr": self.mrr,
             },
             "answer": {
                 "checked": self.answer_checked,
@@ -195,6 +227,8 @@ def summarize(results: list[CaseResult]) -> Summary:
         if r.retrieval.checked:
             s.retrieval_checked += 1
             s.retrieval_hit += 1 if r.retrieval.ok else 0
+            s.retrieval_top1 += 1 if r.retrieval.top1_ok else 0
+            s.retrieval_mrr += r.retrieval.mrr
 
         if r.answer is not None:
             s.answer_checked += 1
@@ -229,6 +263,10 @@ def format_summary(s: Summary) -> str:
         f"用例总数        {s.total}",
         f"检索命中率      {_pct(s.retrieval_rate)}"
         + f"  ({s.retrieval_hit}/{s.retrieval_checked} 条校验了检索)",
+        f"首条命中率      {_pct(s.top1_rate)}"
+        + f"  ({s.retrieval_top1}/{s.retrieval_checked} 条首条即目标文件)",
+        f"MRR            {'n/a' if s.mrr is None else f'{s.mrr:.3f}'}"
+        + "  (第一个正确来源的倒数排名，越接近 1 越好)",
         f"答案通过率      {_pct(s.answer_rate)}"
         + f"  ({s.answer_passed}/{s.answer_checked} 条校验了答案)",
         f"误转人工        {s.false_transfer} 条（不该转却转了）",
