@@ -53,11 +53,17 @@ def agent_node(state, config):
 
 裁剪结果**不写回 state**，所以：
 
-- Checkpointer 保留完整历史 → 坐席端查看历史、事后审计、排查问题都不丢数据
-- 只有送给 LLM 的那一份是窗口
+- Checkpointer 保留完整历史 → 只有送给 LLM 的那一份是窗口
+- 线上排查时可以重放“LLM 当时到底看到了什么”
 
-这是"上下文管理"与"数据保留"两件事的解耦。若把裁剪写回 state，
-虽然省了存储，但坐席端会看不到用户前面说过什么，且一旦裁错无法回滚。
+这是"上下文管理"与"模型输入可追溯性"两件事的解耦。
+
+> **重要区分（本步初稿曾写错）**：**坐席端看到的历史不来自 Checkpointer**。
+> 坐席端与用户端读的是 `chat_message` 表（`app/api/chat.py` → `handoff.get_messages`），
+> 由 API 层 `_save_messages` 写入，与 LangGraph state 无关。
+> Checkpointer 只是 `chat_message` 为空时的**存量会话兜底**
+> （`_messages_from_checkpointer`，step-20 之前的老会话，实测现有 167 个 thread 走这条路径）。
+> 所以"删 messages 会让坐席看不到历史"是不成立的——产品侧历史与模型侧状态是两套数据。
 
 ### 3. 裁剪要留日志
 

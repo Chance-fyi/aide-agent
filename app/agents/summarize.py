@@ -7,7 +7,9 @@
 - `langmem` 的 `SummarizationNode`：能压缩，但依赖链重
   （`langchain` 全量 + `langchain-anthropic` + `trustcall` + `langsmith`），
   版本还是 0.0.x；且它用 `RemoveMessage` **真删 state 里的消息**，
-  与 step-35 定下的"完整历史留在 Checkpointer 供审计/坐席查看"直接冲突。
+  而摘要是 LLM 产出的有损派生物（可能丢关键事实、也可能被用户诱导固化错误），
+  删掉原文就失去了回滚能力；另外 `chat.py` 在 `chat_message` 为空时会回退读
+  Checkpointer 快照（存量会话兜底），删了会让那些会话历史全空。
 - `langchain` 1.x 的 `SummarizationMiddleware`：只能挂在 `create_agent` 上，
   而本项目是手写 `StateGraph`（需要三态 `route_input` 与 `transfer_node`）。
 

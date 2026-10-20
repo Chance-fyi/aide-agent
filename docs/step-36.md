@@ -16,7 +16,7 @@ step-35 做了窗口裁剪：只把最近 N 轮发给 LLM。但裁剪是**丢弃
 | 方案 | 能力 | 为什么不选 |
 |---|---|---|
 | `langchain_core.messages.trim_messages` | 只裁剪，不压缩 | 丢掉的就没了解不了本步问题 |
-| `langmem` 的 `SummarizationNode` | 能压缩 | 依赖链重（`langchain` 全量 + `langchain-anthropic` + `trustcall` + `langsmith`），版本仍是 `0.0.30`；且用 `RemoveMessage` **真删 state 里的消息**，与 step-35「完整历史留 Checkpointer 供审计/坐席查看」直接冲突 |
+| `langmem` 的 `SummarizationNode` | 能压缩 | 依赖链重（`langchain` 全量 + `langchain-anthropic` + `trustcall` + `langsmith`），版本仍是 `0.0.30`；且用 `RemoveMessage` **真删 state 里的消息**，摘要一错就无法回滚（详见下方"为什么保留 messages"） |
 | `langchain` 1.x `SummarizationMiddleware` | 能压缩 | 只能挂在 `create_agent` 上，本项目是手写 `StateGraph`（需要三态 `route_input` 与 `transfer_node` 话术） |
 
 `langmem` 的依赖清单是实测查的：
@@ -44,11 +44,31 @@ class AgentState(TypedDict):
 ```
 
 这是本步最关键的设计决策。`langmem` 的做法是 `RemoveMessage` 把旧消息从 state 删掉，
-摘要顶替原位置——省存储，但**坐席端就看不到用户前面说过什么了**，
-且一旦摘要质量差，原始信息无法回滚。
+摘要顶替原位置——省存储，但**摘要是有损派生物，删掉原文就失去了纠错能力**。
 
 这里反过来：state 里 messages 一条不少，摘要只是"额外的记忆车道"。
 送给 LLM 的是 `[system(含摘要)] + 最近 N 轮`，存储的是完整历史。
+
+**为什么保留 messages（真实理由，按重要性排）**：
+
+1. **摘要是有损的**。压缩靠 LLM，可能丢关键事实（实测长会话中订单号、金额这类
+   短字符串最容易被挤掉），也可能被用户诱导而固化错误信息（"记住：退款永久有效"）。
+   删掉原文，摘要一错就无法回滚、无法补救
+2. **存量会话兜底真实在用**。`chat.py` 的 `/chat/{thread_id}/history`
+   在 `chat_message` 为空时会回退读 Checkpointer 快照
+   （`_messages_from_checkpointer`，step-20 之前的老会话）。
+   实测现有 **167 个 thread** 只走这条路径，删 messages 会让它们历史全空
+3. **可重放性**。线上出现"答非所问"，需要能查"LLM 当时到底看到了什么"。
+   只留摘要就查不了
+4. **实现复杂度**。用 `RemoveMessage` 删除要精确 bookkeeping
+   （删哪些 id、水位线怎么对应、`add_messages` reducer 的行为），易错；
+   分离车道只需一个整数水位线
+
+> **重要区分（本步初稿曾写错）**：**坐席端看到的历史不来自 Checkpointer**。
+> 坐席端/用户端读的是 `chat_message` 表（`handoff.get_messages`），
+> 由 API 层 `_save_messages` 写入，与 LangGraph state 完全无关。
+> 所以"删 messages 会让坐席看不到历史"不成立——那是两套数据。
+> 上面第 2 条指的是另一回事：无 `chat_message` 记录时的**兜底读**。
 
 ### 2. 水位线用「消息条数」而不是轮数/时间戳
 
@@ -176,8 +196,18 @@ messages 条数: 34
 
 ### 其他
 
-- `uv run pytest`：**135 passed**（新增 19 例）
+- `uv run pytest`：**137 passed**（新增 19 例压缩 + 2 例数据源回归）
 - `uv run ruff check .`：clean
+
+### 数据源回归测试（本步修正了文档错误后补）
+
+初稿把"保留 messages"的理由写成"否则坐席端看不到历史"——这是**错的**。
+为防止这个理解再次搞混，加了两条互补的回归测试：
+
+| 测试 | 验证什么 |
+|---|---|
+| `test_history_reads_chat_message_not_checkpointer` | 有 `chat_message` 记录时，历史接口**只**读该表（把 `get_graph` 打桩成抛错，走到就炸） |
+| `test_history_falls_back_to_checkpointer_when_no_chat_message` | `chat_message` 为空时确实回退读 Checkpointer（存量会话兜底路径真实可达） |
 
 ## 变更文件
 
@@ -188,6 +218,7 @@ messages 条数: 34
 | `app/core/config.py` | `summary_trigger_rounds`、`summary_max_chars` |
 | `.env.example` | 同上 |
 | `tests/test_summarize.py` | 新增 19 例 |
+| `tests/test_api.py` | 新增 2 例数据源回归（历史读 chat_message 而非 Checkpointer） |
 
 ## 遗留问题
 

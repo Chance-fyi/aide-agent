@@ -80,7 +80,8 @@ def _window_messages(messages: list[AnyMessage], max_rounds: int) -> list[AnyMes
     max_rounds <= 0 表示不限制（调试时想看全量历史）。
 
     注意：这里只裁剪「送给模型的窗口」，不改 state。
-    Checkpointer 保留完整历史，坐席端查看、事后审计都不丢数据。
+    Checkpointer 保留完整历史 → 线上排查时可重放"LLM 当时到底看到了什么"。
+    （坐席端看的历史不来自这里，而是 chat_message 表，见 api/chat.py）
     """
     if max_rounds <= 0:
         return list(messages)
@@ -189,7 +190,9 @@ class AgentState(TypedDict):
     summary / summarized_count 是本轮之外新增的“压缩车道”：
     - summary：已经滑出窗口的旧对话压成的摘要（空串=还没压过）
     - summarized_count：已压进摘要的消息条数（水位线）
-    messages 本身**永不删减**，完整历史留在 Checkpointer 供审计与坐席查看。
+    messages 本身**永不删减**：摘要是有损派生物，删掉原文就失去纠错能力；
+    且 chat.py 在 chat_message 为空时会回退读本快照（存量会话兜底）。
+    注意坐席端看到的历史是 chat_message 表，不是这里。
     """
 
     messages: Annotated[list[AnyMessage], add_messages]

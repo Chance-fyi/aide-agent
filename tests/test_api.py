@@ -9,6 +9,7 @@ agent 路径需要真实 LLM，不进 CI 冒烟（后面评估集迭代覆盖）
 """
 
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import openai
@@ -351,3 +352,61 @@ async def test_split_compare_unknown_strategy_422(client):
     resp = await client.get("/debug/kb/split_compare", params={"strategies": "magic"})
     assert resp.status_code == 422
     assert "未知切分策略" in resp.json()["detail"]
+
+async def test_history_reads_chat_message_not_checkpointer(client, monkeypatch):
+    """历史接口的数据源是 chat_message 表，**不是** LangGraph Checkpointer。
+
+    这条测试锁住一个容易搞混的事实（step-36 初稿就写错过）：
+    - 坐席端/用户端看到的历史 → `chat_message` 表（API 层 `_save_messages` 写入）
+    - Checkpointer → 仅当 `chat_message` 为空时兜底（step-20 之前的存量会话）
+
+    实现：让 Checkpointer 分支一旦被走到就抛错。
+    只要接口正常返回，就证明它读的是 chat_message。
+    """
+    # 造一条有 chat_message 记录的会话（关键词转接，不依赖真实 LLM）
+    r = await client.post("/chat", json={"message": "我要转人工"})
+    assert r.status_code == 200
+    tid = r.json()["thread_id"]
+
+    async def _boom(*args, **kwargs):
+        raise AssertionError("不应回退到 Checkpointer：chat_message 有记录时必须只读它")
+
+    # 双保险：get_graph 与解析函数都打桩，任何一条被走到都会炸
+    monkeypatch.setattr(chat_mod, "get_graph", _boom)
+    monkeypatch.setattr(chat_mod, "_messages_from_checkpointer", _boom)
+
+    h = await client.get(f"/chat/{tid}/history")
+    assert h.status_code == 200
+    msgs = h.json()["messages"]
+    assert msgs and msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "我要转人工"
+
+async def test_history_falls_back_to_checkpointer_when_no_chat_message(client, monkeypatch):
+    """chat_message 为空时才回退 Checkpointer（存量会话兜底）。
+
+    反向验证上一条：确保兜底路径真的存在且可达，
+    否则"删 state 里的 messages"会静默让老会话历史全空。
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    class _FakeGraph:
+        async def aget_state(self, config):
+            # 用 types.SimpleNamespace 而非定义 class：避免 RUF012（可变类属性）
+            return SimpleNamespace(
+                values={
+                    "messages": [
+                        HumanMessage(content="老会话的提问"),
+                        AIMessage(content="老会话的回答"),
+                    ]
+                }
+            )
+
+    async def _fake_get_graph():
+        return _FakeGraph()
+
+    # chat_mod 是 `from app.agents.runtime import get_graph`，改它自己的引用即可
+    monkeypatch.setattr(chat_mod, "get_graph", _fake_get_graph)
+
+    h = await client.get(f"/chat/{uuid.uuid4()}/history")
+    assert h.status_code == 200
+    assert [m["content"] for m in h.json()["messages"]] == ["老会话的提问", "老会话的回答"]
