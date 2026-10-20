@@ -167,6 +167,8 @@ POST /api/public/otel/v1/traces  4916B / 15623B
 | `app/eval/runner.py` | 评估跑分接入，打 `eval` 标签 |
 | `app/main.py` | lifespan 初始化与关闭 |
 | `scripts/run_eval.py` | 退出前 flush |
+| `compose.yaml` | Langfuse 自建编排（`observability` profile，5 常驻 + 1 一次性） |
+| `deploy/langfuse/clickhouse-config.xml` | 新增：限制 ClickHouse 内存 |
 | `tests/test_tracing.py` | 新增 10 例 |
 
 ## 自建 Langfuse（podman）
@@ -175,14 +177,14 @@ POST /api/public/otel/v1/traces  4916B / 15623B
 
 Langfuse 的 Python SDK 5.x 走 OTel 上报（`/api/public/otel/v1/traces`），
 该端点**只在 server v3+ 存在**。而 v3 架构强制要求 ClickHouse + Redis + MinIO，
-合计 **6 个容器、实测常驻内存约 1.5G**。
+合计 **5 个常驻容器、实测常驻内存约 1.5G**。
 
 大部分开发场景不需要可观测性，不该让所有人都承担这个启动成本。
 所以放进 `compose.yaml` 但加 `profiles: [observability]`：
 
 ```bash
 podman compose up -d                            # 只起业务中间件（4 个）
-podman compose --profile observability up -d    # 连 Langfuse 一起（11 个）
+podman compose --profile observability up -d    # 连 Langfuse 一起（9 个）
 ```
 
 一开始我把它拆成独立文件 `compose.langfuse.yaml`，理由是"不拖慢日常启动"。
@@ -198,12 +200,53 @@ podman compose --profile observability up -d    # 连 Langfuse 一起（11 个�
 | `langfuse-clickhouse` | 事件存储（列式，写入量大） | — |
 | `langfuse-redis` | web → worker 任务队列 | — |
 | `langfuse-minio` | 原始事件落盘（S3 兼容） | 9001（控制台） |
-| `langfuse-postgres` | 元数据（用户/项目/Key） | — |
+| `langfuse-minio-init` | 一次性：建 bucket 后退出 | — |
 
-业务库与 Langfuse 元数据库**分开两个 Postgres 实例**：升级/重置 Langfuse
-不该碰业务数据，且两者 schema 演进节奏完全不同。
+**只有 5 个常驻容器**（`minio-init` 建完桶就退出）。
 
-### 踩到的三个坑
+### 元数据库：复用业务 Postgres 实例，但用独立 database
+
+初版照抄了 Langfuse 官方 compose，单独起了一个 `langfuse-postgres`。
+实测下来这个额外实例没有必要：
+
+| 检查项 | 实测结果 |
+|---|---|
+| 表名冲突 | **零**（Langfuse 72 张表 vs 业务 10 张，无一重名） |
+| schema 占用 | 只用 `public` |
+| 扩展依赖 | 只需默认的 `plpgsql` |
+| 连接数 | 业务 6 + Langfuse 11 = 17，`max_connections` 100 |
+| 内存占用 | 独立实例常驻 32MB，为它多跑一个 PG 不划算 |
+
+所以改成**同实例、独立 database**：
+
+```
+aide-postgres
+├── aide_agent   ← 业务（app_user / chat_message / kb_* / checkpoints）
+└── langfuse     ← Langfuse 元数据（72 张表）
+```
+
+**为什么是独立 database 而不是同一个库**——关键在爆炸半径：
+
+- Langfuse 启动时会自动跑 **424 个 Prisma 迁移**。独立库 = 这些迁移
+  物理上碰不到 `aide_agent` 的表
+- 重置 Langfuse 只需 `DROP DATABASE langfuse`，业务数据零风险
+- 备份粒度可分开（`pg_dump -d langfuse`）
+
+**也不需要建库的 init 容器**：Prisma 迁移会自动 `CREATE DATABASE`。
+实测流程——先 `DROP DATABASE langfuse`，再起 web：
+
+```
+Error: P1003  Database `langfuse` does not exist   ← 首次尝试
+424 migrations found in prisma/migrations
+Applying migration `20230518191501_init`
+...
+$ SELECT count(*) FROM pg_tables WHERE schemaname='public'  →  72
+```
+
+库自动创建、72 张表就绪。所以整个 Langfuse 只需要 `minio-init` 一个 init 容器。
+
+
+### 踩到的四个坑
 
 **1. ClickHouse 挂载配置 Permission denied（exit 233）**
 
@@ -232,20 +275,72 @@ test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health || exit
   改用 Milvus 项目维护的 `docker.io/milvusdb/minio`（同一上游 release，自带 `mc`）
 - Langfuse 启动时**不会创建 bucket**，缺失时 ingestion 返回 500，
   日志只说 `The specified bucket does not exist`，很隐晦。
-  加了一个一次性 `langfuse-minio-init` 服务（`restart: "no"`），
-  web 通过 `service_completed_successfully` 等它就绪
+
+  所以用一个独立的一次性容器 `langfuse-minio-init` 建桶
+  （复用 minio 镜像自带的 `mc`，不额外拉已下架的 `minio/mc`）。
+
+  > 曾试过把建桶塞进 `langfuse-minio` 的 entrypoint（省一个容器），
+  > 但那样要把「后台起 server → 轮询就绪 → 建桶 → `wait $SRV` 交回前台」
+  > 写在一个脚本里。服务进程与一次性初始化混在一起，`wait`/信号处理
+  > 一旦写错容器会静默退出，排查成本高于多一个容器。**拆开更清楚**：
+  > minio 只跑服务，init 只建桶然后退出。
+
+**4. podman-compose 1.6 只支持一个 `service_completed_successfully` 依赖**
+
+这是本步最耗时的坑。当 web 同时依赖两个一次性容器（当时是 `db-init`
+和 `minio-init`）时，`up` 报：
+
+```
+Error: the following dependencies of container <web-id> are not running:
+       <db-init-id>: container state improper
+Error: unable to start container <worker-id>
+```
+
+表现是 **web 能起来，但 worker 永远停在 `Created`**，Langfuse 后台任务
+全部不执行（trace 能进但不出现在 UI）。逐个排除：
+
+| 配置 | 结果 |
+|---|---|
+| web 依赖 1 个 completed 容器 | ✅ 正常 |
+| web 依赖 2 个 completed 容器 | ❌ worker 起不来 |
+| 链式（db-init → minio-init → web） | ❌ 一次性容器带 completed 依赖同样失败 |
+
+根因在 `podman_compose.py:1317`：它把所有 `depends_on`（不分 condition）
+统统翻成 podman 的 `--requires`，而 `--requires` 语义是"目标必须**正在运行**"，
+已退出的一次性容器必然不满足。
+
+结论：**每个服务最多只挂一个 completed 依赖**。正好 `db-init` 本身也是
+多余的（见上文 Prisma 自动建库），去掉后 web 只剩 `minio-init` 一个，
+问题消失。
 
 ### 实测验证
 
 ```
 $ podman compose --profile observability up -d
-aide-langfuse-postgres    Up (healthy)
+aide-postgres             Up (healthy)      ← 业务库，langfuse 库也在这
 aide-langfuse-clickhouse  Up (healthy)
 aide-langfuse-redis       Up (healthy)
 aide-langfuse-minio       Up (healthy)
-aide-langfuse-minio-init  Exited (0)
+aide-langfuse-minio-init  Exited (0)        ← 建完 bucket 即退出
 aide-langfuse-web         Up (healthy)
-aide-langfuse-worker      Up
+aide-langfuse-worker      Up                ← 必须 Up，不能停在 Created
+```
+
+库结构确认：
+
+```
+$ podman exec aide-postgres psql -U aide -d aide_agent -tAc "SELECT datname FROM pg_database"
+aide_agent
+langfuse
+
+$ podman exec aide-postgres psql -U aide -d langfuse -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='public'"
+72      ← 由 Prisma 迁移自动创建，无需 init 容器
+```
+
+上报验证：
+
+```
+trace: chat  session=final-check  tags=['final']
 ```
 
 跑一次带 `search_kb` 工具调用的图，用 Langfuse API 查回：
