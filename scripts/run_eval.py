@@ -136,6 +136,10 @@ async def _run(args, cases):
     finally:
         if args.full:
             await runtime.close()
+            # 脚本跑完就退出，不 flush 会把缓冲区里的 span 全丢掉
+            from app.core import tracing
+
+            tracing.shutdown()
 
 def main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")

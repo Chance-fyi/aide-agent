@@ -60,6 +60,10 @@ async def lifespan(app: FastAPI):
     s = get_settings()
     logger.info("LLM: model=%s base_url=%s", s.llm_model, s.llm_base_url)
     logger.info("Milvus: %s | Postgres: %s:%s", s.milvus_uri, s.postgres_host, s.postgres_port)
+    # 可观测性初始化（未配置 Key 时完全 no-op，不影响启动）
+    from app.core import tracing
+
+    tracing.init()
     # 后台巡检：排队超时的会话自动回退 active（间隔可配）
     sweeper = asyncio.create_task(_queue_sweeper())
     yield
@@ -71,6 +75,8 @@ async def lifespan(app: FastAPI):
         pass
     # close() 是协程，必须 await：早先漏了 await，连接池从未被真正关闭
     await runtime.close()
+    # Langfuse 是批量异步上报，不 flush 会丢掉缓冲区里的 span
+    tracing.shutdown()
 
 
 app = FastAPI(

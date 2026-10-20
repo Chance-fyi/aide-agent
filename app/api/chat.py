@@ -24,7 +24,7 @@ from app.api.schemas import (
     SessionMessage,
     SessionSummary,
 )
-from app.core import guardrails
+from app.core import guardrails, tracing
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -127,9 +127,15 @@ def _handle_live(thread_id: str, message: str, status: str, user_id: str | None 
     return ChatResponse(message=ack, thread_id=thread_id, transferred=True)
 
 
-async def _invoke_agent(thread_id: str, message: str) -> str:
+async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None) -> str:
     """执行 Agent 图并提取纯文本回复；LLM 链路异常翻译为友好 HTTP 错误。"""
-    config = {"configurable": {"thread_id": thread_id}}
+    # 接入 Langfuse：未配置时 build_config 原样返回，与接入前完全等价
+    config = tracing.build_config(
+        thread_id,
+        user_id=user_id,
+        trace_name="chat",
+        base={"configurable": {"thread_id": thread_id}},
+    )
     try:
         graph = await get_graph()
         result = await graph.ainvoke(
@@ -203,7 +209,7 @@ async def chat(
         return _handle_live(thread_id, req.message, status, user_id=uid)
 
     # 正常自助问答：Agent 生成回复后落记录表（跨天恢复/坐席端查看的统一数据源）
-    text = await _invoke_agent(thread_id, req.message)
+    text = await _invoke_agent(thread_id, req.message, user_id=uid)
     # 落库失败只记日志：回复本身已生成，因记录表抖动而报错得不偿失
     _save_messages(thread_id, (ROLE_USER, req.message), (ROLE_AGENT, text), user_id=uid)
 

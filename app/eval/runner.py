@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agents import handoff
 from app.agents.runtime import get_graph
+from app.core import tracing
 from app.core.config import get_settings
 from app.eval.dataset import GoldenCase
 from app.eval.metrics import CaseResult, score_answer, score_retrieval
@@ -155,7 +156,14 @@ async def run_full(
 
             answer: str | None = None
             error: str | None = None
-            config = {"configurable": {"thread_id": tid}}
+            # 评估跑分也上报 Langfuse，但用 tag 区分开：
+            # UI 里能按 eval 标签筛出评估流量，不与真实用户对话混在一起
+            config = tracing.build_config(
+                tid,
+                trace_name=f"eval:{case.id}",
+                tags=["eval", case.category],
+                base={"configurable": {"thread_id": tid}},
+            )
             try:
                 # 多轮用例：先按序重放历史发言，让 Checkpointer 攒出上下文，
                 # 最后一句才是被评估的问题

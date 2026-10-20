@@ -82,6 +82,17 @@ class Settings(BaseSettings):
     # 调试接口开关：生产环境置 false，调试路由不注册
     debug: bool = True
 
+    # ----- Langfuse 可观测性（可选） -----
+    # 总开关：置 false 可临时关闭上报而不删 Key
+    langfuse_enabled: bool = True
+    # 两个 Key 均非空才真正接入；缺任一个则完全 no-op（本地开发默认如此）
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    # 云端或自建实例地址（自建填 http://localhost:3000）
+    langfuse_host: str = "https://cloud.langfuse.com"
+    # 环境标签：同一套 Key 下区分 dev/staging/prod，便于在 UI 里筛选
+    langfuse_environment: str = "development"
+
     # ----- 登录认证 -----
     # Token 签名密钥：生产环境必须通过 .env 覆盖为随机长字符串
     auth_secret: str = "dev-secret-change-me"
