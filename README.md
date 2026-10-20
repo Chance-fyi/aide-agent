@@ -8,7 +8,8 @@
 - 🧠 多轮记忆：LangGraph Postgres Checkpointer 持久化会话
 - 🙋 人工转接：LLM 自主判断 + 关键词规则兜底的双触发机制
 - ⚠️ 异常处理：检索降级、拒答、重试、输入防护（迭代中）
-- 📊 评估：黄金问答集 + 检索/生成两层跑分（`scripts/run_eval.py`）；Langfuse 排期中
+- 📊 评估：黄金问答集 + 检索/生成两层跑分（`scripts/run_eval.py`）
+- 🔍 可观测：Langfuse trace（LLM 调用/工具/节点 span），自建编排在 compose profile 里
 
 ## 快速开始
 
@@ -21,6 +22,8 @@ cp .env.example .env   # 填入你的 LLM base_url / key / model
 
 # 3. 启动中间件（Postgres + Milvus）
 podman compose up -d
+#    可选：连 Langfuse 可观测性一起启动（+6 容器，UI 在 :3000）
+#    podman compose --profile observability up -d
 
 # 4. 启动后端
 uv run uvicorn app.main:app --reload

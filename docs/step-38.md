@@ -169,11 +169,132 @@ POST /api/public/otel/v1/traces  4916B / 15623B
 | `scripts/run_eval.py` | 退出前 flush |
 | `tests/test_tracing.py` | 新增 10 例 |
 
+## 自建 Langfuse（podman）
+
+### 为什么用 profile 而不是无条件启动
+
+Langfuse 的 Python SDK 5.x 走 OTel 上报（`/api/public/otel/v1/traces`），
+该端点**只在 server v3+ 存在**。而 v3 架构强制要求 ClickHouse + Redis + MinIO，
+合计 **6 个容器、实测常驻内存约 1.5G**。
+
+大部分开发场景不需要可观测性，不该让所有人都承担这个启动成本。
+所以放进 `compose.yaml` 但加 `profiles: [observability]`：
+
+```bash
+podman compose up -d                            # 只起业务中间件（4 个）
+podman compose --profile observability up -d    # 连 Langfuse 一起（11 个）
+```
+
+一开始我把它拆成独立文件 `compose.langfuse.yaml`，理由是"不拖慢日常启动"。
+但 profile 机制本来就能解决这个问题，拆文件反而带来两个实际麻烦：
+两个 compose 各自管理网络与卷、环境变量要同步改两处。已合并回主文件。
+
+### 组件与端口
+
+| 容器 | 作用 | 宿主机端口 |
+|---|---|---|
+| `langfuse-web` | UI + Ingestion API | 3000 |
+| `langfuse-worker` | 异步处理事件/评估/导出 | — |
+| `langfuse-clickhouse` | 事件存储（列式，写入量大） | — |
+| `langfuse-redis` | web → worker 任务队列 | — |
+| `langfuse-minio` | 原始事件落盘（S3 兼容） | 9001（控制台） |
+| `langfuse-postgres` | 元数据（用户/项目/Key） | — |
+
+业务库与 Langfuse 元数据库**分开两个 Postgres 实例**：升级/重置 Langfuse
+不该碰业务数据，且两者 schema 演进节奏完全不同。
+
+### 踩到的三个坑
+
+**1. ClickHouse 挂载配置 Permission denied（exit 233）**
+
+rootless podman 下 SELinux 需要重标，`deploy/langfuse/clickhouse-config.xml`
+的挂载必须加 `:z`：
+
+```yaml
+- ./deploy/langfuse/clickhouse-config.xml:/etc/clickhouse-server/config.d/langfuse.xml:ro,z
+```
+
+不加时容器启动即循环退出，日志只有一行 `Permission denied`。
+
+**2. `localhost` 在容器内解析到 IPv6，healthcheck 永远失败**
+
+Next.js standalone 在容器内监听容器网络接口，**不监听 loopback**。
+`wget --spider http://localhost:3000` 会 `Connection refused`（`localhost` → `::1`），
+`127.0.0.1` 同样失败。必须用 `$(hostname)`：
+
+```yaml
+test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health || exit 1"]
+```
+
+**3. MinIO 官方镜像已下架，且 Langfuse 不会自己建 bucket**
+
+- `docker.io/minio/minio` 与 `quay.io/minio/mc` 均已 403/401。
+  改用 Milvus 项目维护的 `docker.io/milvusdb/minio`（同一上游 release，自带 `mc`）
+- Langfuse 启动时**不会创建 bucket**，缺失时 ingestion 返回 500，
+  日志只说 `The specified bucket does not exist`，很隐晦。
+  加了一个一次性 `langfuse-minio-init` 服务（`restart: "no"`），
+  web 通过 `service_completed_successfully` 等它就绪
+
+### 实测验证
+
+```
+$ podman compose --profile observability up -d
+aide-langfuse-postgres    Up (healthy)
+aide-langfuse-clickhouse  Up (healthy)
+aide-langfuse-redis       Up (healthy)
+aide-langfuse-minio       Up (healthy)
+aide-langfuse-minio-init  Exited (0)
+aide-langfuse-web         Up (healthy)
+aide-langfuse-worker      Up
+```
+
+跑一次带 `search_kb` 工具调用的图，用 Langfuse API 查回：
+
+```
+trace: chat  session=e2e-verify-001  user=42
+
+observation 数: 9
+  CHAIN  LangGraph          22.219ms   ← 根 span
+  CHAIN  __start__           0.015ms
+  CHAIN  route_input         0.013ms
+  AGENT  agent               0.002ms
+  CHAIN  tools_condition     0.001ms
+  CHAIN  tools              22.195ms
+  TOOL   search_kb          22.194ms
+  AGENT  agent               0.002ms
+  CHAIN  tools_condition     0.001ms
+```
+
+内容捕获确认：
+
+```
+input : {'messages': [['user', '怎么退货']]}
+output: {'messages': [{'content': '怎么退货', ...}]}
+tags  : ['e2e', 'verify']
+TOOL input : {'query': '退货'}
+TOOL output: {'content': '【promo-seckill.md | 秒杀与限时抢购规则/退货说明 | 相关度 0.74】...'}
+```
+
+**输入、输出、工具参数、工具返回、tags 全部落库**。
+
+### 预置的开发账号
+
+compose 里通过 `LANGFUSE_INIT_*` 自动创建，无需手动注册：
+
+| 项 | 值 |
+|---|---|
+| UI | http://localhost:3000 |
+| 账号 | `dev@aide-agent.local` / `dev-password-123` |
+| 项目 Public Key | `pk-lf-aide-agent-dev` |
+| 项目 Secret Key | `sk-lf-aide-agent-dev` |
+
+`.env.example` 默认就指向自建实例（本地开发零配置可用）。
+
 ## 遗留问题
 
-- **未接自建 Langfuse**。自建需要 Clickhouse + Redis + MinIO + Postgres 四件套，
-  体量远超本项目现有中间件。默认指向 Langfuse Cloud；
-  自建时把 `LANGFUSE_HOST` 改成实例地址即可，代码无需改动
+- **自建实例的密钥是开发默认值**。`NEXTAUTH_SECRET` / `SALT` / `ENCRYPTION_KEY`
+  以及预置的项目 Key（`pk-lf-aide-agent-dev` / `sk-lf-aide-agent-dev`）都写在
+  compose 里，仅适合本地开发。对外暴露或生产部署前必须全部替换
 - **敏感信息未脱敏**。用户输入原样上报（含手机号、订单号等）。
   生产必须加 `mask` 函数过滤 PII——SDK 支持 `Langfuse(mask=...)`，
   本步未实现，属于合规必需项

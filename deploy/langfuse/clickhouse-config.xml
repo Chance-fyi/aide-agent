@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!--
+  Langfuse 用 ClickHouse 配置覆盖（挂载到 /etc/clickhouse-server/config.d/）
+
+  存在的唯一理由：**限制内存**。
+  ClickHouse 默认 max_server_memory_usage 是系统内存的 90%，
+  而本机还要跑 Milvus + 两个 Postgres，不压住会把开发机拖死。
+-->
+<clickhouse>
+    <logger>
+        <level>warning</level>
+        <console>true</console>
+    </logger>
+
+    <!-- 容器内必须监听 0.0.0.0，否则同网络的 web/worker 连不上 -->
+    <listen_host>0.0.0.0</listen_host>
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+
+    <!-- 单节点部署：不做副本与分片 -->
+    <mark_cache_size>268435456</mark_cache_size>
+    <max_server_memory_usage>2147483648</max_server_memory_usage>
+
+    <profiles>
+        <default>
+            <max_memory_usage>2000000000</max_memory_usage>
+            <max_threads>4</max_threads>
+            <!-- Langfuse 的查询以聚合为主，单查询并行度不宜过高 -->
+            <max_block_size>65536</max_block_size>
+        </default>
+    </profiles>
+
+    <!-- 用户/密码由 CLICKHOUSE_USER / CLICKHOUSE_PASSWORD 环境变量注入，
+         这里不要重复声明，否则环境变量会被静态配置覆盖 -->
+</clickhouse>

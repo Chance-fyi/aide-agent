@@ -1,5 +1,6 @@
 # 客服 Agent 中间件编排（podman）
 # 启动：podman compose up -d
+# 含可观测性：podman compose --profile observability up -d（详见文件末尾 Langfuse 段）
 #
 # Milvus 编排说明：
 # 曾尝试单容器内嵌 etcd（ETCD_USE_EMBED=true），但内嵌 etcd 在 rootless podman
@@ -82,7 +83,228 @@ services:
       milvus:
         condition: service_healthy
 
+# ============================================================
+# Langfuse 可观测性（可选，profile: observability）
+#
+# 默认不启动：`podman compose up -d` 只起业务中间件，不会多拉 6 个容器。
+# 需要时：
+#   podman compose --profile observability up -d
+# 访问 http://localhost:3000 （已预置开发账号 dev@aide-agent.local / dev-password-123）
+#
+# 为什么要 profile 而不是无条件启动：
+# Langfuse v3 架构强制要求 ClickHouse + Redis + MinIO（SDK 走 OTel 上报，
+# 该端点只在 server v3+ 存在），合计 6 个容器、实测常驻内存约 1.5G。
+# 大部分开发场景不需要它，不该让所有人都承担这个启动成本。
+#
+# 六个组件缺一不可：
+#   langfuse-web      UI + Ingestion API
+#   langfuse-worker   异步处理事件/评估/导出
+#   langfuse-clickhouse  事件存储（写入量大，列式）
+#   langfuse-redis     web → worker 任务队列
+#   langfuse-minio     原始事件落盘（S3 兼容）
+#   langfuse-postgres  元数据（用户/项目/Key/数据集）
+# ============================================================
+
+  # ---------- 元数据库：独立实例，与业务库隔离 ----------
+
+  langfuse-postgres:
+    image: docker.io/postgres:16-alpine
+    container_name: aide-langfuse-postgres
+    profiles: ["observability"]
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse_secret
+      POSTGRES_DB: langfuse
+    volumes:
+      - aide_langfuse_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------- ClickHouse：trace 存储 ----------
+
+  langfuse-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:24.3
+    container_name: aide-langfuse-clickhouse
+    profiles: ["observability"]
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse_secret
+      # 允许用环境变量管理用户（官方镜像默认关闭）
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - aide_langfuse_clickhouse:/var/lib/clickhouse
+      # 自定义配置：限制内存上限。ClickHouse 默认会吃掉大半系统内存，
+      # 本机还有 Milvus/Postgres 在跑，必须压住
+      # 注意 :z（小写）：rootless podman 下 SELinux 需要重标，
+      # 不加会在容器内报 Permission denied 并导致启动循环退出（exit 233）
+      - ./deploy/langfuse/clickhouse-config.xml:/etc/clickhouse-server/config.d/langfuse.xml:ro,z
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      # 官方镜像不带 curl/wget，用 clickhouse-client 探活
+      test: ["CMD", "clickhouse-client", "--user", "clickhouse", "--password", "clickhouse_secret", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # ---------- Redis：web → worker 的任务队列 ----------
+
+  langfuse-redis:
+    image: docker.io/redis:7-alpine
+    container_name: aide-langfuse-redis
+    profiles: ["observability"]
+    command: ["redis-server", "--requirepass", "redis_secret", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - aide_langfuse_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_secret", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------- MinIO：原始事件对象存储 ----------
+  # 注意：docker.io/minio/minio 官方社区镜像已下架（403），
+  # 这里用 Milvus 项目维护的 MinIO 发布镜像（同一上游 release，S3 兼容）
+
+  langfuse-minio:
+    image: docker.io/milvusdb/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: aide-langfuse-minio
+    profiles: ["observability"]
+    command: ["minio", "server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio_secret
+    ports:
+      - "9001:9001"     # 控制台 http://localhost:9001（9000 不映射，避免与 ClickHouse 原生端口混淆）
+    volumes:
+      - aide_langfuse_minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------- MinIO 初始化：创建 bucket ----------
+  # 为何需要：Langfuse 不会自己建 bucket，缺失时报 500 且日志只说
+  # "The specified bucket does not exist"，很隐晦。
+  # 用 minio 镜像自带的 mc 一次性创建，成功后退出（restart: no）。
+
+  langfuse-minio-init:
+    image: docker.io/milvusdb/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: aide-langfuse-minio-init
+    profiles: ["observability"]
+    depends_on:
+      langfuse-minio:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        mc alias set lf http://langfuse-minio:9000 minio minio_secret &&
+        mc mb --ignore-existing lf/langfuse &&
+        echo "bucket langfuse 就绪"
+    restart: "no"
+
+  # ---------- Langfuse Web：UI + Ingestion API ----------
+
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3
+    container_name: aide-langfuse-web
+    profiles: ["observability"]
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      # 等 bucket 建好，否则首批 span 会因 S3 上传失败被丢弃
+      langfuse-minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:langfuse_secret@langfuse-postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3000
+      # 以下三个密钥是 Langfuse 的加密/会话凭据。
+      # 生产环境必须替换（NEXTAUTH_SECRET/SALT 任意长随机串，ENCRYPTION_KEY 必须 64 位 hex）
+      NEXTAUTH_SECRET: dev-langfuse-nextauth-secret-change-me
+      SALT: dev-langfuse-salt-change-me
+      ENCRYPTION_KEY: cd75b7b478bfe559fc0fd7bed3797d022eed5fb6d8793597e331c3ca13744a39
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse_secret
+      # 单节点部署必须关闭集群模式，否则迁移脚本会等不到副本
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: redis_secret
+      # 事件落盘（S3 兼容）：event 与 media 两个桶，这里共用一个桶 + 不同前缀
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minio_secret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minio_secret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      # 批量导出到 S3 需要额外配置，本项目不用
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      # 关闭实验特性（评估器等），只保留 tracing
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      # 自建实例的初始化管理员（首次启动自动创建，无需手动注册）
+      LANGFUSE_INIT_ORG_ID: aide-agent
+      LANGFUSE_INIT_ORG_NAME: aide-agent
+      LANGFUSE_INIT_PROJECT_ID: aide-agent
+      LANGFUSE_INIT_PROJECT_NAME: aide-agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-aide-agent-dev
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-aide-agent-dev
+      LANGFUSE_INIT_USER_EMAIL: dev@aide-agent.local
+      LANGFUSE_INIT_USER_NAME: dev
+      LANGFUSE_INIT_USER_PASSWORD: dev-password-123
+    healthcheck:
+      # 用 $(hostname) 而非 localhost/127.0.0.1：
+      # Next.js standalone 在容器内监听容器网络接口，不监听 loopback，
+      # 探活打 127.0.0.1 会 Connection refused（实测）
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # ---------- Langfuse Worker：异步处理事件/评估/导出 ----------
+  # 与 web 共用同一份环境变量（YAML 锚点复用），只换启动命令
+
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3
+    container_name: aide-langfuse-worker
+    profiles: ["observability"]
+    depends_on:
+      langfuse-web:
+        condition: service_healthy
+    environment: *langfuse-env
+
 volumes:
   aide_pgdata:
   aide_etcd:
   aide_milvus:
+  aide_langfuse_pgdata:
+  aide_langfuse_clickhouse:
+  aide_langfuse_redis:
+  aide_langfuse_minio:
