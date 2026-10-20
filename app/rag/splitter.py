@@ -180,12 +180,69 @@ def _load_txt(path: Path) -> list[Chunk]:
     return _split_plain_text(path.read_text(encoding="utf-8"), source=path.name)
 
 def _load_docx(path: Path) -> list[Chunk]:
-    """docx：提取所有非空段落，按纯文本流程处理（标题样式暂不区分）。"""
+    """docx：优先按 Word 标题样式（Heading 1/2）切小节，退化为纯文本流程。
+
+    为什么不一律按纯文本处理：Word 文档的标题样式就是语义结构，
+    丢掉它等于放弃父子检索的"小节"边界，父块只能靠 800 字硬切。
+    真实业务文档也普遍用标题样式组织章节，值得识别。
+
+    退化条件：全文没有任何 Heading 段落（纯段落排版的文档），
+    此时与 txt 同流程。
+    """
     from docx import Document
 
     doc = Document(str(path))
+    chunks: list[Chunk] = []
+    h1, h2 = "", ""
+    section: list[str] = []
+    parent_key = 0
+    has_heading = False
+
+    def flush() -> None:
+        nonlocal section, parent_key
+        if not section:
+            return
+        content = "\n\n".join(section)
+        chunks.extend(
+            _chunks_from_section(content, path.name, h1 or path.name, h2, parent_key)
+        )
+        parent_key += 1
+        section = []
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style = (para.style.name or "") if para.style is not None else ""
+        level = _heading_level(style)
+        if level is not None:
+            has_heading = True
+            flush()  # 遇到标题：先结束上一小节
+            if level == 1:
+                h1, h2 = text, ""
+            else:
+                h2 = text
+            continue
+        section.append(text)
+    flush()
+
+    if has_heading:
+        return chunks
+    # 无标题样式：与 txt 完全一致的处理
     text = "\n\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
     return _split_plain_text(text, source=path.name)
+
+def _heading_level(style_name: str) -> int | None:
+    """Word 段落样式 → 标题层级（1/2）；非标题返回 None。
+
+    兼容中英文版 Word 的样式名（"Heading 1" / "标题 1"）。
+    """
+    name = style_name.strip().lower()
+    if name in ("heading 1", "标题 1"):
+        return 1
+    if name in ("heading 2", "标题 2"):
+        return 2
+    return None
 
 def _load_pdf(path: Path) -> list[Chunk]:
     """pdf：逐页提取文字后按纯文本流程处理。扫描件无文字层会得到空结果（预期行为）。"""
