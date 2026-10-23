@@ -5,9 +5,9 @@
 推送则把节奏收回服务端。业务代码只说"这个会话有新消息"，
 "该发给哪些连接"由这里决定。
 
-部署约束（必须知道）：连接表在**进程内存**里，因此只在单进程部署下成立。
-多 worker 时 A 进程的推送到不了 B 进程的连接，需要引入 Redis Pub/Sub 或
-Postgres LISTEN/NOTIFY 做跨进程总线——本步不做，见 docs/step-39.md 的遗留项。
+部署模型：连接表在**进程内存**里，跨进程靠 `core/bus.py` 的
+Postgres LISTEN/NOTIFY 总线广播（`WS_BUS_ENABLED` 开关）。
+总线不可用时自动退回单进程行为，不会让对话不可用。
 
 发送模型：每条连接一个 outbox 队列 + 一个写协程。
 为什么不直接 await ws.send_json：
@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from starlette.websockets import WebSocket
 
 from app.agents import handoff
+from app.core.bus import bus
 
 logger = logging.getLogger(__name__)
 
@@ -121,13 +122,12 @@ class Hub:
             )
 
     def push_user(self, user_id: int | None, event: dict) -> None:
-        """推给某个用户端账号的所有在线连接。"""
+        """推给某个用户端账号的所有在线连接（本地 + 跨进程）。"""
         if user_id is None:
             return
-        # tuple() 快照：遍历期间连接可能被移除（单事件循环下虽不会并发，
-        # 但 remove 发生在别的协程里，快照能让语义不依赖这个隐含前提）
-        for conn in tuple(self._users.get(user_id, ())):
-            self.send(conn, event)
+        self.deliver_user(user_id, event)
+        # 广播给其他进程：本进程已经投递过了，接收端会按 origin 跳过自己
+        bus.publish("user", user_id=user_id, event=event)
 
     def push_thread(self, thread_id: str, event: dict) -> None:
         """按会话归属推给对应用户端（匿名会话无归属，推不到，属预期）。
@@ -135,20 +135,52 @@ class Hub:
         这里要查一次归属：用户端的连接是按账号索引的，而推送方只知道
         thread_id。主键级查询，开销可忽略。
         """
-        if not self._users:
-            return  # 没有用户端在线，连查询都省了
+        # 不能因为"本进程没有用户端连接"就提前返回——
+        # 别的进程可能持有这个用户的连接，那才是跨进程总线要解决的场景
         self.push_user(handoff.get_thread_user(thread_id), event)
 
     def push_agents(self, event: dict, thread_id: str | None = None) -> None:
-        """推给坐席端。
+        """推给坐席端（本地 + 跨进程）。
 
         thread_id 为 None → 所有在线坐席（队列类事件）；
         否则只推给正在看该会话的坐席（会话内消息，避免无关坐席被打扰）。
         """
+        self.deliver_agents(event, thread_id)
+        bus.publish("agents", event=event, thread_id=thread_id)
+
+    # ---------- 仅本地投递（总线接收端也调这两个） ----------
+
+    def deliver_user(self, user_id: int, event: dict) -> None:
+        """只投递给本进程持有的该用户连接。
+
+        与 push_user 分开的原因：总线接收时绝不能再 publish 一次，
+        否则两个进程会互相回声，事件数量指数级增长。
+        """
+        # tuple() 快照：遍历期间连接可能被移除（单事件循环下虽不会并发，
+        # 但 remove 发生在别的协程里，快照能让语义不依赖这个隐含前提）
+        for conn in tuple(self._users.get(user_id, ())):
+            self.send(conn, event)
+
+    def deliver_agents(self, event: dict, thread_id: str | None = None) -> None:
+        """只投递给本进程持有的坐席连接（语义见 deliver_user）。"""
         for conn in tuple(self._agents):
             if thread_id is not None and thread_id not in conn.watching:
                 continue
             self.send(conn, event)
+
+    def deliver_remote(self, event: dict) -> None:
+        """总线接收回调：把其他进程发来的事件投给本进程的连接。
+
+        注意这里**不重新 publish**——这是避免回声的关键。
+        """
+        target = event.get("target")
+        payload = event.get("event") or {}
+        if target == "user":
+            user_id = event.get("user_id")
+            if user_id is not None:
+                self.deliver_user(user_id, payload)
+        elif target == "agents":
+            self.deliver_agents(payload, event.get("thread_id"))
 
     # ---------- 写协程 ----------
 

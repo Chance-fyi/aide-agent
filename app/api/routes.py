@@ -16,6 +16,7 @@ from app.api.schemas import (
     AgentUserHistoryResponse,
     SessionMessage,
 )
+from app.core.bus import bus
 from app.core.config import get_settings
 from app.core.hub import hub
 
@@ -27,10 +28,18 @@ router = APIRouter()
 async def health():
     """健康检查：中间件连通性在这里汇总上报（后续步骤逐步补充检查项）。"""
     s = get_settings()
+    # 事件总线状态：多 worker 部署时它是"推送能不能跨进程"的唯一依据，
+    # 必须能从外部看出来（否则只能靠翻日志猜）
+    bus_info = {
+        "enabled": s.ws_bus_enabled,
+        "running": bus.running,
+        **bus.stats,
+    }
     return {
         "status": "ok",
         "llm_model": s.llm_model,
         "milvus": s.milvus_uri,
+        "event_bus": bus_info,
     }
 
 

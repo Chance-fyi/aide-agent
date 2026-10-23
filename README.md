@@ -12,6 +12,7 @@
 | 人工转接 | LLM 工具调用自主判断 + 关键词规则兜底；排队超时自动回退 |
 | 坐席工作台 | 队列抢单、接入锁定、跨会话用户历史、处理结果备注 |
 | 实时推送 | 双端 WebSocket（消息 / 转接状态 / 队列变化），断线指数退避重连 |
+| 多实例 | Postgres LISTEN/NOTIFY 跨进程总线，支持 `--workers N`；不可用时自动降级单进程 |
 | 输入防护 | 提示注入检测 + 违禁词拦截，命中即友好拒答并留痕 |
 | 限流保护 | 按账号/ IP 滑动窗口限流 + LLM 并发闸门（超限快速失败而非无限排队） |
 | 可观测 | Langfuse trace（LLM / 工具 / LangGraph 节点 span），未配置时零侵入 no-op |
@@ -104,7 +105,7 @@ uv run python scripts/run_eval.py --full # 评估：完整链路（检索 + 生�
 ```
 app/
   main.py            # FastAPI 入口：只做组装（路由、生命周期）
-  core/              # 配置、LLM 客户端、鉴权、输入防护、WS 连接中心、Langfuse
+  core/              # 配置、LLM、鉴权、输入防护、WS 连接中心、事件总线、限流、迁移
   api/               # 路由：/chat /auth /agent /ws，以及业务编排 process_message
   agents/            # LangGraph 图、工具、转接状态机、上下文摘要
   rag/               # 切块、embedding、Milvus 与 Postgres 存储

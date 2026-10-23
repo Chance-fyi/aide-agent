@@ -93,6 +93,11 @@ class Settings(BaseSettings):
     # 环境标签：同一套 Key 下区分 dev/staging/prod，便于在 UI 里筛选
     langfuse_environment: str = "development"
 
+    # ----- 跨进程推送总线 -----
+    # 用 Postgres LISTEN/NOTIFY 在进程间广播推送事件（多 worker 部署必需）。
+    # 关掉后退回单进程行为：单 worker 下功能完全等价，多 worker 会丢跨进程推送
+    ws_bus_enabled: bool = True
+
     # ----- 限流与并发保护 -----
     # 每个调用者每分钟最多发多少条消息（<=0 表示关闭限流）。
     # 为什么需要：每条消息触发一次 LLM 调用（超时 30s + 重试 2 次），

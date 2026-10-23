@@ -19,6 +19,7 @@ from app.api.routes import agent_router, router
 from app.api.ws import router as ws_router
 from app.core import migrations
 from app.core.config import get_settings
+from app.core.hub import hub
 
 # 日志基础配置：生产部署时由 gunicorn/uvicorn 参数或环境变量接管更细粒度的配置，
 # 这里保证"无论谁启动进程，异常都能以统一格式落到 stderr"
@@ -101,6 +102,12 @@ async def lifespan(app: FastAPI):
 
     await prepare_schema(s)
 
+    # 跨进程事件总线：多 worker 部署时推送能跨进程送达。
+    # 启动失败只降级（退回单进程），不让总线成为启动前提
+    from app.core.bus import bus
+
+    await bus.start(hub.deliver_remote)
+
     # 可观测性初始化（未配置 Key 时完全 no-op，不影响启动）
     from app.core import tracing
 
@@ -108,7 +115,9 @@ async def lifespan(app: FastAPI):
     # 后台巡检：排队超时的会话自动回退 active（间隔可配）
     sweeper = asyncio.create_task(_queue_sweeper())
     yield
-    # 关闭：先停巡检任务，再释放 Agent 的 Checkpointer 连接池
+    # 关闭：先停巡检任务与事件总线，再释放 Agent 的 Checkpointer 连接池。
+    # 总线要先停：它自己持有两条 Postgres 连接，不关会拖慢进程退出
+    await bus.stop()
     sweeper.cancel()
     try:
         await sweeper

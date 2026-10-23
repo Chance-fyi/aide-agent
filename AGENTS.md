@@ -12,7 +12,7 @@
   → 消息落 `chat_message` 表 → 经 WebSocket 推给双端
 - **已完成**：MVP → 异常处理 → 测试 → 评估集 → 上下文窗口/摘要 → Langfuse →
   坐席工作台 → WebSocket 实时推送 → 前端视觉重做
-- **未开始**：多 Agent 重构、SSE 流式输出、跨进程推送总线（见各步文档的遗留问题）
+- **未开始**：多 Agent 重构、SSE 流式输出、知识库管理 UI（见各步文档的遗留问题）
 
 ## 硬性约束（每次修改代码都必须遵守）
 
@@ -59,6 +59,7 @@ app/
     migrations.py    # 数据库迁移：版本表 + 有序迁移列表（DDL 的唯一来源）
     ratelimit.py     # 限流（滑动窗口）+ 并发闸门（保护 LLM 与连接池）
     hub.py           # WebSocket 连接中心：寻址推送、每连接 outbox
+    bus.py           # 跨进程事件总线（Postgres LISTEN/NOTIFY，zlib+base64 编码）
     llm.py guardrails.py security.py users.py tracing.py
   api/
     chat.py          # 业务编排 process_message（REST 与 WS 共用）
@@ -130,6 +131,13 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
   就是新的计数桶（等于没限流）。匿名必须按 IP，登录按账号 ID。
 - **限流/闸门的计数器在进程内存里**，多 worker 时实际限额 = 配置 × worker 数。
   与 `core/hub.py` 的连接表是同一个约束，跨进程要 Redis。
+- **`Hub.push_*` 会同时做本地投递和总线广播**，`Hub.deliver_*` 只做本地投递。
+  总线接收端必须走 `deliver_remote` → `deliver_*`，绝不能调 `push_*`——
+  否则两个进程互相回声，事件数指数增长。
+- **`asyncio.Event`/`Queue` 不能在模块级单例的 `__init__` 里创建**。
+  `bus = EventBus()` 在 import 时构造，那时没有运行中的事件循环，
+  对象会被绑到错误的 loop，之后一 await 就报 "bound to a different event loop"。
+  必须在 `start()`（运行在 app 循环里）懒创建。
 - **不要 monkeypatch 全局 `time.monotonic`**。asyncio 的事件循环时钟就是它，
   冻结后所有 `asyncio.wait_for` 永不超时（踩过一次：并发闸门测试挂死）。
   需要控制时间就注入时钟（见 `SlidingWindowLimiter(clock=...)`）。
