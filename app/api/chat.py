@@ -193,13 +193,20 @@ def _handle_guarded(
     return ChatOutcome(thread_id, reply, status, handoff.is_live_status(status))
 
 def _handle_live(
-    thread_id: str, message: str, status: str,
-    user_id: int | None = None, *, push_reply: bool = False,
+    thread_id: str, message: str, status: str, user_id: int | None = None,
 ) -> ChatOutcome:
     """已转接会话的处理：用户消息直达人工工作台，不再消耗 LLM。
 
-    应答话术只回给前端、不落库——它不是对话内容，落库会在坐席端制造噪音；
-    代价是刷新后临时应答消失，但用户消息本身已在记录表里，可接受。
+    注意这里**不推送任何消息气泡**：
+    - 排队中：转接横幅已经写着"已转接人工，坐席会尽快回复"，
+      再给每条消息回一句"您的消息已收到"会让用户连发几条时被刷屏
+    - 坐席已接入：用户在跟人对话，机器人插话反而干扰
+
+    发送是否成功由 `sent` 事件单独确认（见 app/api/ws.py），
+    不能靠"有没有回复"去猜——那样坐席接入后用户永远等不到回复，
+    输入框就会永久锁死（曾是一个真实 bug）。
+
+    返回值里的 reply 只给 REST 客户端用（/chat 的响应体）。
     """
     try:
         saved = _append(thread_id, ROLE_USER, message, user_id)
@@ -210,13 +217,7 @@ def _handle_live(
     # 即时推给坐席：这是"用户补发消息"的主链路，晚 4 秒都可能让坐席漏看
     _notify_agents_message(thread_id, ROLE_USER, message, saved, user_id)
 
-    # 排队中：回一句确认话术让用户知道消息没丢；
-    # 坐席已接入：不再回机器人应答（reply 置空，前端不渲染气泡）——
-    # 用户此时在和人工对话，每次发言都被机器人"已收到"刷屏反而干扰。
-    # 确认话术不落库（不是对话内容），所以 saved 传 None（无 id）
     ack = _QUEUED_ACK if status == handoff.STATUS_QUEUED else ""
-    if push_reply and ack:
-        _push_user_message(user_id, ROLE_AGENT, ack, None)
     return ChatOutcome(thread_id, ack, status, True)
 
 async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None) -> str:
@@ -304,7 +305,7 @@ async def process_message(
     # 已转接会话：用户消息直达人工
     status = _get_thread_status(thread_id)
     if handoff.is_live_status(status):
-        return _handle_live(thread_id, message, status, uid, push_reply=push_reply)
+        return _handle_live(thread_id, message, status, uid)
 
     # 正常自助问答。
     # 用户消息**先落库再调 Agent**（与原实现相反），两个收益：

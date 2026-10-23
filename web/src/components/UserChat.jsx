@@ -39,7 +39,7 @@ function UserChat() {
 function UserChatInner({ auth, onLogout }) {
   const [messages, setMessages] = useState([]);       // { role, content, ts, sender_name }
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);      // 等待回复中（显示光标）
+  const [loading, setLoading] = useState(false);      // 等待机器人回复中（仅自助问答阶段）
   const [transferred, setTransferred] = useState(false); // 是否已转人工
   const [restored, setRestored] = useState(false);    // 历史是否已就绪（否则显示骨架）
   const [connected, setConnected] = useState(false);  // WS 是否已连上
@@ -57,6 +57,27 @@ function UserChatInner({ auth, onLogout }) {
     setMessages((prev) =>
       mergeMessage(prev, { ...msg, ts: msg.ts ?? new Date().toISOString() }),
     );
+  }, []);
+
+  // 发送中的保护定时器：清 pending 不能只依赖服务端事件。
+  // hub 的 outbox 满时会丢弃事件（见 app/core/hub.py），一条丢失的确认
+  // 就能让输入框永久禁用——这类"卡死"必须有一条超时兼容路径。
+  const pendingTimer = useRef(null);
+  const clearPending = useCallback(() => {
+    if (pendingTimer.current) clearTimeout(pendingTimer.current);
+    pendingTimer.current = null;
+    setLoading(false);
+  }, []);
+  const startPending = useCallback(() => {
+    if (pendingTimer.current) clearTimeout(pendingTimer.current);
+    setLoading(true);
+    // 60s 远大于正常响应（LLM 超时重试后也会走 error 事件），
+    // 只当兵底：宁可偶尔提前解锁，也不要永久锁死
+    pendingTimer.current = setTimeout(() => setLoading(false), 60_000);
+  }, []);
+  // 卸载时清定时器，避免在已卸载组件上 setState
+  useEffect(() => () => {
+    if (pendingTimer.current) clearTimeout(pendingTimer.current);
   }, []);
 
   // 建立实时连接（登录态变化时重建；卸载时关闭）
@@ -79,13 +100,20 @@ function UserChatInner({ auth, onLogout }) {
             setMessages(ev.messages ?? []);
             setTransferred(isLiveStatus(ev.status));
             setRestored(true);
-            setLoading(false);
+            clearPending();
             break;
           case "message":
             appendMessage(ev.message);
             // 对方回复到了 → 收起"输入中"。
             // 用户自己的消息不会推回来（本地已乐观插入）
-            if (ev.message?.role !== ROLE.USER) setLoading(false);
+            if (ev.message?.role !== ROLE.USER) clearPending();
+            break;
+          case "sent":
+            // 服务端确认"消息已接收"。这是清 pending 的**主信号**：
+            // 已转人工时根本不会有机器人回复，靠回复事件清状态会让输入框
+            // 永久禁用（曾导致"转人工后只能发一条消息"）
+            clearPending();
+            setTransferred(isLiveStatus(ev.status));
             break;
           case "status":
             setTransferred(isLiveStatus(ev.status));
@@ -93,7 +121,7 @@ function UserChatInner({ auth, onLogout }) {
           case "error":
             // 后端给的是可操作文案（校验失败/LLM 故障），直接展示
             appendMessage({ role: ROLE.AGENT, content: ev.message });
-            setLoading(false);
+            clearPending();
             break;
           default:
             break;   // pong 等心跳应答无需处理
@@ -106,7 +134,7 @@ function UserChatInner({ auth, onLogout }) {
       socketRef.current = null;
     };
     // 只依赖 token：登录态不变就不该重建连接
-  }, [auth.token, appendMessage, onLogout]);
+  }, [auth.token, appendMessage, clearPending, onLogout]);
 
   // 消息列表始终钉在最新消息。滚动容器 CSS 已禁用平滑滚动与浏览器锚定
   useLayoutEffect(() => {
@@ -116,7 +144,10 @@ function UserChatInner({ auth, onLogout }) {
 
   function send(textArg) {
     const text = (textArg ?? input).trim();
-    if (!text || loading) return;   // 转人工后仍可发消息，只拦"发送中"
+    if (!text) return;
+    // 只有"自助问答等待机器人回复"期间需要防重复提交；
+    // 已转人工是人和人在对话，不能因为上一条还没收到确认就拦下一条
+    if (loading && !transferred) return;
 
     const socket = socketRef.current;
     // 连接断开时明确告知而不是静默失败：用户以为发出去了、其实没发，
@@ -130,7 +161,7 @@ function UserChatInner({ auth, onLogout }) {
     // 重连后由 ready 快照替换为服务端时间
     appendMessage({ role: ROLE.USER, content: text });
     setInput("");
-    setLoading(true);
+    startPending();
     inputRef.current?.focus({ preventScroll: true });
   }
 
@@ -244,14 +275,16 @@ function UserChatInner({ auth, onLogout }) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={transferred ? "补充问题，坐席会看到" : "输入消息，回车发送"}
-            disabled={loading}
+            /* 仅自助问答等待机器人时锁输入；已转人工不能锁，
+               否则上一条的确认晚到一会儿就会阻止下一条 */
+            disabled={loading && !transferred}
             autoFocus
             aria-label="消息输入"
           />
           <button
             className="send"
             type="submit"
-            disabled={loading || !input.trim()}
+            disabled={(loading && !transferred) || !input.trim()}
             aria-label="发送消息"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

@@ -363,3 +363,76 @@ def test_reply_duplicate_is_one_row_in_history(ws_client):
     assert human[0]["content"] == "只应出现一次"
     # 历史里每条消息都带 id：前端与推送消息对齐时需要
     assert all(r.get("id") is not None for r in rows)
+
+# ============================================================
+# 回归：转人工后只能发一条消息
+# ============================================================
+
+def test_user_can_send_repeatedly_after_agent_joined(ws_client):
+    """坐席已接入（in_service）后，用户每发一条消息都应收到服务端确认。
+
+    这条测试锁住一个真实 bug：`_handle_live` 在 in_service 下 ack 为空、
+    什么都不推送回去，而客户端靠"收到回复"来清 `loading` 状态 ——
+    于是输入框永久禁用，用户发完一条就再也发不出去了。
+
+    修法是服务端对每条**已接收**的用户消息都回一个 `sent` 事件
+    （与"机器人回复"区分开）：发送成功与否必须有确定信号，
+    不能让客户端靠"有没有回复"去猜。
+    """
+    auth = _register(ws_client)
+    agent_token = _agent_token()
+    headers = {"Authorization": f"Bearer {agent_token}"}
+
+    thread_id = str(uuid.uuid4())
+    handoff.set_thread_user(thread_id, _user_id(auth["username"]))
+    handoff.mark_pending_human(thread_id, "测试转接")
+    assert ws_client.post(
+        f"/agent/threads/{thread_id}/accept", json={}, headers=headers
+    ).status_code == 200
+    assert handoff.get_status(thread_id) == handoff.STATUS_IN_SERVICE
+
+    with ws_client.websocket_connect(f"/ws/chat?token={auth['token']}") as user_ws:
+        ready = _recv_until(user_ws, "ready")
+        assert ready["status"] == handoff.STATUS_IN_SERVICE
+
+        # 连发三条：每条都必须有 sent 确认，不能只第一条有
+        for i in range(3):
+            user_ws.send_json({"type": "message", "content": f"补充第{i + 1}句"})
+            ev = _recv_until(user_ws, "sent")
+            assert ev["status"] == handoff.STATUS_IN_SERVICE
+
+    # 三条都应落库（一条都不该被吞掉）
+    rows = handoff.get_messages(thread_id)
+    user_rows = [r for r in rows if r["role"] == "user" and r["content"].startswith("补充第")]
+    assert len(user_rows) == 3
+
+def test_user_can_send_repeatedly_while_queued(ws_client):
+    """排队中（尚未接入）连发多条：每条都有 sent 确认，且不再推"已收到"气泡。
+
+    排队态的确认话术改由转接横幅表达（"已转接人工，坐席会尽快回复"）。
+    每条消息都回一句"您的消息已收到"会在用户连发时刷屏，
+    而它本就不是对话内容、刷新后也会消失。
+    REST 客户端仍能从响应体拿到这句话术，行为不变。
+    """
+    auth = _register(ws_client)
+    thread_id = str(uuid.uuid4())
+    handoff.set_thread_user(thread_id, _user_id(auth["username"]))
+    handoff.mark_pending_human(thread_id, "测试排队")
+
+    with ws_client.websocket_connect(f"/ws/chat?token={auth['token']}") as user_ws:
+        assert _recv_until(user_ws, "ready")["status"] == handoff.STATUS_QUEUED
+
+        for i in range(3):
+            user_ws.send_json({"type": "message", "content": f"排队第{i + 1}句"})
+            ev = _recv_until(user_ws, "sent")
+            assert ev["status"] == handoff.STATUS_QUEUED
+
+        # 不应有机器人气泡被推回来：sent 之后紧跟的下一条若有 message 就是 bug
+        user_ws.send_json({"type": "ping"})
+        ev = _recv_until(user_ws, "pong")
+        assert ev["type"] == "pong"
+
+    # 三条用户消息都落库，且没有落库任何"已收到"话术
+    rows = handoff.get_messages(thread_id)
+    assert len([r for r in rows if r["content"].startswith("排队第")]) == 3
+    assert not any("已收到" in r["content"] for r in rows)

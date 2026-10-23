@@ -150,8 +150,8 @@ async def _handle_user_message(conn: Connection, user: dict, content) -> None:
         return
 
     try:
-        # push_reply=True：回复走推送，函数返回值这里用不上
-        await chat.process_message(req.message, user, push_reply=True)
+        # push_reply=True：机器人的回复走推送，函数返回值这里用不上
+        outcome = await chat.process_message(req.message, user, push_reply=True)
     except Exception as exc:
         # process_message 内部已把 LLM 异常翻译成 HTTPException（detail 即友好文案）
         detail = getattr(exc, "detail", None)
@@ -159,6 +159,18 @@ async def _handle_user_message(conn: Connection, user: dict, content) -> None:
             logger.exception("WS 对话处理失败 user=%s", user["id"])
             detail = "客服服务暂时不可用，请稍后重试"
         hub.send(conn, {"type": "error", "message": detail})
+        return
+
+    # 发送确认：无论本轮有没有机器人回复，都要告诉客户端"消息已被接收"。
+    # 为什么单独一个事件而不是靠"回复"去推断：已转人工（尤其坐席已接入）时
+    # 根本不会有人回复，客户端若等回复来清"发送中"状态，输入框就会永久锁死——
+    # 这正是"转人工后只能发一条消息"的根因。
+    # status 一并下发：客户端据此同步转接 UI（无需再单独等 status 事件）
+    hub.send(conn, {
+        "type": "sent",
+        "thread_id": outcome.thread_id,
+        "status": outcome.status,
+    })
 
 # ============================================================
 # 坐席端
