@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from app.core.bus import CHANNEL, EventBus, bus
+from app.core.bus import EventBus
 from app.core.config import get_settings
 
 # ============================================================
@@ -134,7 +134,7 @@ async def _wait_for(predicate, timeout=5.0):
 
 async def test_event_reaches_other_process(two_buses):
     """A 广播 → B 收到（这是本步要解决的核心问题）。"""
-    (a, got_a), (b, got_b) = two_buses
+    (a, got_a), (_b, got_b) = two_buses
 
     a.publish("user", user_id=42, event={"type": "message", "n": 1})
 
@@ -159,7 +159,7 @@ async def test_bidirectional(two_buses):
 
 async def test_large_message_survives_bus(two_buses):
     """2000 字符的中文消息要能完整跨进程送达（不被截断/丢失）。"""
-    (a, got_a), (b, got_b) = two_buses
+    (a, _got_a), (_b, got_b) = two_buses
     content = "退款审核通过后按原路退回，支付宝微信 1-3 个工作日。" * 50   # ~1400 字
     content = content[:2000]
 
