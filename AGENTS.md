@@ -57,6 +57,7 @@ app/
   core/
     config.py        # 全部配置（pydantic-settings，读 .env）
     migrations.py    # 数据库迁移：版本表 + 有序迁移列表（DDL 的唯一来源）
+    ratelimit.py     # 限流（滑动窗口）+ 并发闸门（保护 LLM 与连接池）
     hub.py           # WebSocket 连接中心：寻址推送、每连接 outbox
     llm.py guardrails.py security.py users.py tracing.py
   api/
@@ -125,5 +126,12 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
 - **测试不要连真实库**。迁移类测试用临时库（见 `tests/test_migrations.py` 的
   `temp_db` fixture），并注意 `from ... import get_settings` 绑定的是名字，
   要 patch **使用方模块**才生效——踩过一次，假迁移被应用到开发库上。
+- **限流键不能只用 thread_id**。匿名会话的 thread_id 是客户端传的，换一个
+  就是新的计数桶（等于没限流）。匿名必须按 IP，登录按账号 ID。
+- **限流/闸门的计数器在进程内存里**，多 worker 时实际限额 = 配置 × worker 数。
+  与 `core/hub.py` 的连接表是同一个约束，跨进程要 Redis。
+- **不要 monkeypatch 全局 `time.monotonic`**。asyncio 的事件循环时钟就是它，
+  冻结后所有 `asyncio.wait_for` 永不超时（踩过一次：并发闸门测试挂死）。
+  需要控制时间就注入时钟（见 `SlidingWindowLimiter(clock=...)`）。
 - **历史数据源是 `chat_message` 表，不是 Checkpointer**。Checkpointer 只在
   记录表为空时兜底（存量会话）。有测试锁住这一点。

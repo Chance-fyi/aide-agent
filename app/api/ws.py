@@ -27,6 +27,7 @@ from app.agents import handoff
 from app.api import chat
 from app.api.chat import THREAD_ID_PATTERN
 from app.api.schemas import ChatRequest
+from app.core import ratelimit
 from app.core.config import get_settings
 from app.core.hub import Connection, hub
 from app.core.security import ROLE_AGENT, decode_token
@@ -110,6 +111,9 @@ async def chat_socket(ws: WebSocket) -> None:
 
     conn = Connection(ws=ws, user_id=user["id"])
     await hub.add(conn)
+    # 匿名限流键用握手时的客户端 IP（与 REST 的 _client_ip 同一口径，
+    # 但 WS 拿不到 X-Forwarded-For 之外的 request 对象，这里直接用 scope 的 client）
+    client_ip = ws.client.host if ws.client else None
     try:
         # 首帧快照：客户端拿到即完成"恢复历史 + 恢复转接状态"，无需再发 HTTP 请求。
         # 查库是同步 psycopg，扔到线程池，避免阻塞事件循环里的其他连接
@@ -130,7 +134,7 @@ async def chat_socket(ws: WebSocket) -> None:
             if kind == "ping":
                 hub.send(conn, {"type": "pong"})
             elif kind == "message":
-                await _handle_user_message(conn, user, data.get("content"))
+                await _handle_user_message(conn, user, data.get("content"), client_ip)
             else:
                 hub.send(conn, {"type": "error", "message": f"不支持的事件类型: {kind}"})
     except WebSocketDisconnect:
@@ -140,7 +144,9 @@ async def chat_socket(ws: WebSocket) -> None:
     finally:
         hub.remove(conn)
 
-async def _handle_user_message(conn: Connection, user: dict, content) -> None:
+async def _handle_user_message(
+    conn: Connection, user: dict, content, client_ip: str | None = None,
+) -> None:
     """处理一条用户消息：复用 REST 的同一套业务编排（process_message）。"""
     try:
         # 复用 ChatRequest 做校验（去空白 / 长度上限），与 REST 口径完全一致
@@ -151,7 +157,20 @@ async def _handle_user_message(conn: Connection, user: dict, content) -> None:
 
     try:
         # push_reply=True：机器人的回复走推送，函数返回值这里用不上
-        outcome = await chat.process_message(req.message, user, push_reply=True)
+        outcome = await chat.process_message(
+            req.message, user, push_reply=True, client_ip=client_ip
+        )
+    except ratelimit.RateLimitExceeded as exc:
+        # 限流/繁忙也要回一条明确提示：WS 没有 HTTP 状态码，
+        # 不告知的话用户只会看到消息“消失”
+        hub.send(conn, {
+            "type": "error",
+            "message": f"发送太频繁，请 {exc.retry_after} 秒后再试",
+        })
+        return
+    except ratelimit.BusyError:
+        hub.send(conn, {"type": "error", "message": "当前咨询人数较多，请稍后重试"})
+        return
     except Exception as exc:
         # process_message 内部已把 LLM 异常翻译成 HTTPException（detail 即友好文案）
         detail = getattr(exc, "detail", None)

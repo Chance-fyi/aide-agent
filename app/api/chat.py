@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 
 import openai
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException, Path, Request
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agents import handoff
@@ -31,7 +31,7 @@ from app.api.schemas import (
     SessionMessage,
     SessionSummary,
 )
-from app.core import guardrails, tracing
+from app.core import guardrails, ratelimit, tracing
 from app.core.config import get_settings
 from app.core.hub import hub
 
@@ -279,19 +279,44 @@ def _resolve_thread(user: dict | None, thread_id: str | None) -> str:
     handoff.set_thread_user(tid, user["id"])
     return tid
 
+def _rate_key(user: dict | None, thread_id: str | None, client_ip: str | None) -> str:
+    """限流键：登录用户按账号，匿名按 IP。
+
+    为什么匿名不能用 thread_id：它是客户端自己传的（localStorage 里的值），
+    每次换个新 ID 就是一个新的计数桶——等于没限流。
+    IP 能伪造（代理头），但比"完全免费的客户端 ID"强得多；
+    真要精确需要网关层配合，不在本步范围。
+
+    拿不到 IP 时（如脚本直接调内部函数）退回 thread_id：
+    这是"有总比没有好"的降级，不假装它安全。
+    """
+    if user is not None:
+        return f"user:{user['id']}"
+    if client_ip:
+        return f"ip:{client_ip}"
+    return f"anon:{thread_id or 'unknown'}"
+
 async def process_message(
     message: str,
     user: dict | None,
     thread_id: str | None = None,
     *,
     push_reply: bool = False,
+    client_ip: str | None = None,
 ) -> ChatOutcome:
     """一轮对话的完整业务处理（落库 + 推送 + 生成回复）。
 
     push_reply：回复是否通过 WebSocket 推给用户。
     REST 入口传 False（回复走响应体，避免同一个气泡到两次）；
     WS 入口传 True（回复没有响应体可回，只能推）。
+
+    client_ip：匿名用户的限流键。登录用户用账号 ID，匿名必须用 IP——
+    匿名会话的 thread_id 是客户端自己传的，换个 ID 就能绕过限流。
     """
+    # 限流放在最前面：它比后面的安检/落库/LLM 都便宜，
+    # 且被拦下的请求不应该产生任何副作用（不写库、不打 LLM）
+    ratelimit.check_rate(_rate_key(user, thread_id, client_ip))
+
     thread_id = _resolve_thread(user, thread_id)
     # 匿名用户无归属，user 消息不带 user_id；登录用户统一取账号 ID
     uid = user["id"] if user else None
@@ -314,7 +339,17 @@ async def process_message(
     saved_user = _append_safe(thread_id, ROLE_USER, message, uid)
     _notify_agents_message(thread_id, ROLE_USER, message, saved_user, uid)
 
-    text = await _invoke_agent(thread_id, message, user_id=uid)
+    # 并发闸门只包住 LLM 调用（真正的昂贵资源），不包落库：
+    # 落库是毫秒级操作，限它反而会在繁忙时丢掉用户消息
+    guard = ratelimit.get_guard()
+    await guard.acquire()
+    try:
+        text = await _invoke_agent(thread_id, message, user_id=uid)
+    finally:
+        # finally 里释放：LLM 超时/抛异常也必须归还名额，
+        # 否则几个失败请求就能把闸门永久占满
+        guard.release()
+
     saved_agent = _append_safe(thread_id, ROLE_AGENT, text)
     _notify_agents_message(thread_id, ROLE_AGENT, text, saved_agent)
     if push_reply:
@@ -334,6 +369,7 @@ async def process_message(
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     req: ChatRequest,
+    request: Request,
     user: OptionalUser,
 ) -> ChatResponse:
     """核心对话接口：一个问题进，一个回复出。
@@ -341,12 +377,41 @@ async def chat(
     认证为"可选"：未登录仍可自助问答（匿名会话，坐席端显示为游客）；
     登录用户则会话绑定到账号，坐席端才能看到"谁在提问"。
     """
-    outcome = await process_message(req.message, user, req.thread_id)
+    try:
+        outcome = await process_message(
+            req.message, user, req.thread_id, client_ip=_client_ip(request)
+        )
+    except ratelimit.RateLimitExceeded as exc:
+        # 429 而非 503：语义是"你发得太快"，客户端应该退避而不是换台服务器
+        raise HTTPException(
+            status_code=429,
+            detail=f"发送太频繁，请 {exc.retry_after} 秒后再试",
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from None
+    except ratelimit.BusyError:
+        # 503：系统繁忙（并发闸门满了），与"你发太快"区分开
+        raise HTTPException(
+            status_code=503,
+            detail="当前咨询人数较多，请稍后重试",
+            headers={"Retry-After": "5"},
+        ) from None
     return ChatResponse(
         message=outcome.reply,
         thread_id=outcome.thread_id,
         transferred=outcome.transferred,
     )
+
+def _client_ip(request: Request) -> str | None:
+    """取客户端 IP 作为匿名限流键。
+
+    优先 X-Forwarded-For 的第一段（反向代理后的真实客户端）。
+    这个头客户端可以伪造——所以它只用于"提高绕过成本"，
+    不当成安全边界；真正需要精确限流时应该在网关层做。
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or None
+    return request.client.host if request.client else None
 
 def build_user_snapshot(user_id: int) -> dict:
     """用户端连接建立时的状态快照（WS 的 ready 事件，也是 /chat/my/history 的数据源）。

@@ -17,43 +17,17 @@ import asyncio
 import uuid
 
 import psycopg
-import pytest
-from pytest import MonkeyPatch
-from starlette.testclient import TestClient
 
 from app.agents import handoff
 from app.api import chat as chat_mod
 from app.core.config import get_settings
 from app.core.hub import OUTBOX_MAX, Connection, hub
 from app.core.security import ROLE_AGENT, create_token
-from app.core.users import create_user, ensure_table
-from app.main import app
+from app.core.users import create_user
 
 # ============================================================
 # 夹具与工具
 # ============================================================
-
-async def _noop_sweeper() -> None:
-    """替代真实的排队超时巡检：不 sleep、不查库，保持测试环境干净。"""
-    return
-
-@pytest.fixture(scope="module")
-def ws_client():
-    """模块级共享一个 TestClient（详见文件头说明）。
-
-    生命周期里顺手关掉两个与推送无关的副作用：
-    - tracing.init/shutdown：.env 配了 Langfuse 时会在收尾阶段尝试网络 flush，
-      测试不该依赖外部服务
-    - 队列超时巡检：后台 UPDATE 会偷偷改掉别的用例造的数据
-    """
-    mp = MonkeyPatch()
-    mp.setattr("app.core.tracing.init", lambda: False)
-    mp.setattr("app.core.tracing.shutdown", lambda: None)
-    mp.setattr("app.main._queue_sweeper", _noop_sweeper)
-    ensure_table()
-    with TestClient(app) as client:
-        yield client
-    mp.undo()
 
 def _fake_invoke(reply: str):
     """替换 `_invoke_agent`：绕开 LLM 与 Checkpointer，只验证推送。"""
@@ -63,7 +37,7 @@ def _fake_invoke(reply: str):
 
     return _invoke
 
-def _register(client: TestClient) -> dict:
+def _register(client) -> dict:
     """注册一个用户端账号，返回 AuthResponse（含 token/username）。"""
     username = f"ws_user_{uuid.uuid4().hex[:8]}"
     resp = client.post(

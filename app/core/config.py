@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     # 环境标签：同一套 Key 下区分 dev/staging/prod，便于在 UI 里筛选
     langfuse_environment: str = "development"
 
+    # ----- 限流与并发保护 -----
+    # 每个调用者每分钟最多发多少条消息（<=0 表示关闭限流）。
+    # 为什么需要：每条消息触发一次 LLM 调用（超时 30s + 重试 2 次），
+    # 不限制的话任何人写个脚本就能把账单刷到任意额度
+    rate_limit_per_minute: int = 20
+    # 同时在跑的 LLM 调用上限（<=0 表示不限）。
+    # 必须明显小于 Postgres 连接池（max_size=10）：占满池子会让**所有用户**
+    # 的对话一起排队，比超支更致命
+    llm_max_concurrency: int = 4
+
     # ----- 数据库迁移 -----
     # 启动时是否自动应用待执行的 schema 迁移。
     # 开发/单实例：true 最省事；多副本部署建议 false，
