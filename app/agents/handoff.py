@@ -95,25 +95,31 @@ def ensure_table() -> None:
 def append_message(
     thread_id: str, role: str, content: str,
     user_id: str | None = None, sender_id: int | None = None,
-) -> str | None:
-    """追加一条用户可见的会话记录，返回入库时间（ISO 字符串）。
+) -> dict | None:
+    """追加一条用户可见的会话记录，返回 `{id, ts}`。
 
     role 取值见 app.api.chat 的 ROLE_* 常量：user / agent(智能客服) / human(人工坐席)。
     user_id 仅 user 角色消息传入（记录发送者，支持"按用户查消息"）；
     sender_id 仅 human 角色消息传入（坐席账号，展示昵称时 JOIN app_user）。
     失败由调用方决定是否降级（记日志不抛出场景居多）。
 
-    返回 created_at 是为了让 WebSocket 推送的消息带**服务端时间戳**：
-    前端用本地时间乐观插入的话，双端时钟不一致会出现"回复时间早于提问"
-    "的倒挂。取不到时返回 None，前端回退本地时间。
+    为什么要返回 id：消息有**两条**到达前端的路径——REST 响应体与 WebSocket 推送。
+    发送方既自己插一条、又作为订阅者收到同一条推送，不去重就会出现两条；
+    而“按内容+时间匹配”不可靠（本地时钟 vs 服务端 created_at 必然不同）。
+    主键 id 是唯一天然去重键，前端据此合并。
+
+    返回 ts（created_at）的理由同理：前端用本地时间乐观插入会导致双端时间轴
+    倒挂，以服务端时间为准。取不到时返回 None，前端回退本地时间。
     """
     with _get_conn() as conn:
         row = conn.execute(
             "INSERT INTO chat_message (thread_id, role, content, user_id, sender_id) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING created_at",
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id, created_at",
             (thread_id, role, content, user_id, sender_id),
         ).fetchone()
-    return row[0].isoformat() if row else None
+    if row is None:
+        return None
+    return {"id": row[0], "ts": row[1].isoformat()}
 
 
 def get_messages(thread_id: str) -> list[dict]:
@@ -121,7 +127,7 @@ def get_messages(thread_id: str) -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT m.role, m.content, m.created_at, u.display_name
+            SELECT m.id, m.role, m.content, m.created_at, u.display_name
             FROM chat_message m
             LEFT JOIN app_user u ON u.id = m.sender_id
             WHERE m.thread_id = %s
@@ -130,7 +136,7 @@ def get_messages(thread_id: str) -> list[dict]:
             (thread_id,),
         ).fetchall()
     return [
-        {"role": r[0], "content": r[1], "ts": r[2].isoformat(), "sender_name": r[3]}
+        {"id": r[0], "role": r[1], "content": r[2], "ts": r[3].isoformat(), "sender_name": r[4]}
         for r in rows
     ]
 
@@ -381,7 +387,7 @@ def get_user_messages(user_id: int, limit: int = 200) -> list[dict]:
     with _get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT m.thread_id, m.role, m.content, m.created_at, u.display_name
+            SELECT m.id, m.thread_id, m.role, m.content, m.created_at, u.display_name
             FROM chat_message m
             LEFT JOIN app_user u ON u.id = m.sender_id
             WHERE m.thread_id IN (
@@ -395,8 +401,8 @@ def get_user_messages(user_id: int, limit: int = 200) -> list[dict]:
     # SQL 倒序取最新的 N 条，返回时转回正序（聊天流从上往下读）
     return [
         {
-            "thread_id": r[0], "role": r[1], "content": r[2],
-            "ts": r[3].isoformat(), "sender_name": r[4],
+            "id": r[0], "thread_id": r[1], "role": r[2], "content": r[3],
+            "ts": r[4].isoformat(), "sender_name": r[5],
         }
         for r in reversed(rows)
     ]

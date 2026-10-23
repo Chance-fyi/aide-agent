@@ -106,8 +106,8 @@ def _get_thread_status(thread_id: str) -> str:
 def _append(
     thread_id: str, role: str, content: str,
     user_id: str | None = None, sender_id: int | None = None,
-) -> str | None:
-    """写一条会话记录并返回入库时间；失败向上抛（由调用方决定后果）。"""
+) -> dict | None:
+    """写一条会话记录并返回 `{id, ts}`；失败向上抛（由调用方决定后果）。"""
     return handoff.append_message(
         thread_id, role, content,
         # 只给用户消息打归属标记；坐席消息带 sender_id（展示"是谁回复的"）
@@ -115,7 +115,9 @@ def _append(
         sender_id,
     )
 
-def _append_safe(thread_id: str, role: str, content: str, user_id: str | None = None) -> str | None:
+def _append_safe(
+    thread_id: str, role: str, content: str, user_id: str | None = None,
+) -> dict | None:
     """写一条会话记录，失败只记日志。
 
     适用场景：记录表抖动不该让用户看不到已经生成好的回复。
@@ -127,7 +129,8 @@ def _append_safe(thread_id: str, role: str, content: str, user_id: str | None = 
         return None
 
 def _notify_agents_message(
-    thread_id: str, role: str, content: str, ts: str | None, user_id: int | None = None,
+    thread_id: str, role: str, content: str, saved: dict | None,
+    user_id: int | None = None,
 ) -> None:
     """把新消息推给正在看这个会话的坐席（替代坐席端的 4 秒轮询）。"""
     hub.push_agents(
@@ -137,20 +140,33 @@ def _notify_agents_message(
             # user_id 让坐席端能判断"这条消息属不属于我正在看的那个用户"
             # （坐席详情面板展示的是跨 thread 的用户完整历史流）
             "user_id": user_id,
-            "message": {"role": role, "content": content, "ts": ts},
+            # id 是服务端主键：前端靠它去重（消息会同时经 REST 与 WS 两条路径到达）
+            "message": {
+                "id": saved["id"] if saved else None,
+                "role": role,
+                "content": content,
+                "ts": saved["ts"] if saved else None,
+            },
         },
         thread_id=thread_id,
     )
 
 def _push_user_message(
-    user_id: int | None, role: str, content: str, ts: str | None, sender_name: str | None = None,
+    user_id: int | None, role: str, content: str, saved: dict | None,
+    sender_name: str | None = None,
 ) -> None:
     """把一条消息推给用户端（WS 入口专用；REST 入口用响应体回传）。"""
     if user_id is None:
         return
     hub.push_user(user_id, {
         "type": "message",
-        "message": {"role": role, "content": content, "ts": ts, "sender_name": sender_name},
+        "message": {
+            "id": saved["id"] if saved else None,
+            "role": role,
+            "content": content,
+            "ts": saved["ts"] if saved else None,
+            "sender_name": sender_name,
+        },
     })
 
 # ============================================================
@@ -165,12 +181,12 @@ def _handle_guarded(
     guardrails.log_rejection(thread_id, category, message)
     reply = guardrails.refusal_reply(category)
     # 拦截记录也进会话记录表：坐席端能看到用户发了什么、系统为何拦截
-    ts_user = _append_safe(thread_id, ROLE_USER, message, user_id)
-    _notify_agents_message(thread_id, ROLE_USER, message, ts_user, user_id)
-    ts_agent = _append_safe(thread_id, ROLE_AGENT, reply)
-    _notify_agents_message(thread_id, ROLE_AGENT, reply, ts_agent)
+    saved_user = _append_safe(thread_id, ROLE_USER, message, user_id)
+    _notify_agents_message(thread_id, ROLE_USER, message, saved_user, user_id)
+    saved_agent = _append_safe(thread_id, ROLE_AGENT, reply)
+    _notify_agents_message(thread_id, ROLE_AGENT, reply, saved_agent)
     if push_reply:
-        _push_user_message(user_id, ROLE_AGENT, reply, ts_agent)
+        _push_user_message(user_id, ROLE_AGENT, reply, saved_agent)
     # 状态用真实值而非硬编码 active：安检只是短路了本轮问答，
     # 会话可能仍在排队中，前端 UI 不该被这一轮错误地切回"自助"
     status = _get_thread_status(thread_id)
@@ -186,17 +202,18 @@ def _handle_live(
     代价是刷新后临时应答消失，但用户消息本身已在记录表里，可接受。
     """
     try:
-        ts = _append(thread_id, ROLE_USER, message, user_id)
+        saved = _append(thread_id, ROLE_USER, message, user_id)
     except Exception:
         # 落库失败不能吞掉用户的消息：让前端知道发送失败，提示重试
         logger.exception("会话记录落库失败 thread=%s", thread_id)
         raise HTTPException(status_code=503, detail="消息发送失败，请重试") from None
     # 即时推给坐席：这是"用户补发消息"的主链路，晚 4 秒都可能让坐席漏看
-    _notify_agents_message(thread_id, ROLE_USER, message, ts, user_id)
+    _notify_agents_message(thread_id, ROLE_USER, message, saved, user_id)
 
     # 排队中：回一句确认话术让用户知道消息没丢；
     # 坐席已接入：不再回机器人应答（reply 置空，前端不渲染气泡）——
-    # 用户此时在和人工对话，每次发言都被机器人"已收到"刷屏反而干扰
+    # 用户此时在和人工对话，每次发言都被机器人"已收到"刷屏反而干扰。
+    # 确认话术不落库（不是对话内容），所以 saved 传 None（无 id）
     ack = _QUEUED_ACK if status == handoff.STATUS_QUEUED else ""
     if push_reply and ack:
         _push_user_message(user_id, ROLE_AGENT, ack, None)
@@ -293,14 +310,14 @@ async def process_message(
     # 用户消息**先落库再调 Agent**（与原实现相反），两个收益：
     # 1. 坐席端不必等 LLM 跑完才看到"用户在等"，实时感来自这里
     # 2. LLM 超时/失败时用户消息不会凭空消失（history 里留有据可查）
-    ts_user = _append_safe(thread_id, ROLE_USER, message, uid)
-    _notify_agents_message(thread_id, ROLE_USER, message, ts_user, uid)
+    saved_user = _append_safe(thread_id, ROLE_USER, message, uid)
+    _notify_agents_message(thread_id, ROLE_USER, message, saved_user, uid)
 
     text = await _invoke_agent(thread_id, message, user_id=uid)
-    ts_agent = _append_safe(thread_id, ROLE_AGENT, text)
-    _notify_agents_message(thread_id, ROLE_AGENT, text, ts_agent)
+    saved_agent = _append_safe(thread_id, ROLE_AGENT, text)
+    _notify_agents_message(thread_id, ROLE_AGENT, text, saved_agent)
     if push_reply:
-        _push_user_message(uid, ROLE_AGENT, text, ts_agent)
+        _push_user_message(uid, ROLE_AGENT, text, saved_agent)
 
     # 转接可能在 Agent 执行中发生（LLM 调了转接工具 / 关键词兜底）：
     # 重新查一次状态。查询失败降级为"未转接"——代价是前端少一次提示，可接受。

@@ -288,3 +288,78 @@ def test_ws_user_receives_human_reply(ws_client):
         assert ev["message"]["content"] == "人工回复来了"
         # 用户端气泡要显示"是谁回复的"
         assert ev["message"]["sender_name"] == "WS坐席"
+
+# ============================================================
+# 回归：坐席回复重复气泡
+# ============================================================
+
+def test_agent_reply_is_delivered_once_with_same_id(ws_client):
+    """坐席自己发出的回复只应得到**一条**消息，且两条路径带同一个 id。
+
+    这条测试锁住一个真实 bug：坐席发送回复时，消息会走两条路回到自己——
+    1. REST POST /reply 的响应体
+    2. WS 推送（自己正在 watch 该会话，服务端广播给所有 watcher）
+    前端两条都 push 就会出现两个气泡，刷新后又变回一条（从 DB 重载）。
+
+    修法是让两条路径都带服务端主键 id，前端按 id 合并。
+    所以这里断言的是：响应体与推送的 id 必须一致（前端才有合并的依据）。
+    """
+    auth = _register(ws_client)
+    agent_token = _agent_token()
+    headers = {"Authorization": f"Bearer {agent_token}"}
+
+    thread_id = str(uuid.uuid4())
+    handoff.set_thread_user(thread_id, _user_id(auth["username"]))
+    handoff.mark_pending_human(thread_id, "测试转接")
+    assert ws_client.post(
+        f"/agent/threads/{thread_id}/accept", json={}, headers=headers
+    ).status_code == 200
+
+    with ws_client.websocket_connect(f"/ws/agent?token={agent_token}") as agent_ws:
+        _recv_until(agent_ws, "ready")
+        # watch 后用 ping/pong 确认订阅生效（同一连接内事件按序处理）
+        agent_ws.send_json({"type": "watch", "thread_id": thread_id})
+        agent_ws.send_json({"type": "ping"})
+        _recv_until(agent_ws, "pong")
+
+        resp = ws_client.post(
+            f"/agent/threads/{thread_id}/reply",
+            json={"content": "这是一条回复"}, headers=headers,
+        )
+        assert resp.status_code == 200
+        from_rest = resp.json()["message"]
+        assert from_rest["id"] is not None, "响应体必须带消息主键，前端才能去重"
+        assert from_rest["ts"], "响应体必须带服务端时间戳（不能前端自己拼）"
+
+        pushed = _recv_until(agent_ws, "message")["message"]
+        assert pushed["content"] == "这是一条回复"
+        # 核心断言：同一消息在两条路径上的 id 必须相同
+        assert pushed["id"] == from_rest["id"], (
+            "REST 响应与 WS 推送的 id 不一致，前端无法去重 → 会显示两条"
+        )
+
+def test_reply_duplicate_is_one_row_in_history(ws_client):
+    """无论前端收到几次，落库只有一条：历史接口不应出现重复内容。
+
+    这是"刷新后变一条"的直接证据——DB 里本来就只有一条，
+    重复完全是前端渲染层的问题。
+    """
+    auth = _register(ws_client)
+    agent_token = _agent_token()
+    headers = {"Authorization": f"Bearer {agent_token}"}
+
+    thread_id = str(uuid.uuid4())
+    handoff.set_thread_user(thread_id, _user_id(auth["username"]))
+    handoff.mark_pending_human(thread_id, "测试转接")
+    ws_client.post(f"/agent/threads/{thread_id}/accept", json={}, headers=headers)
+    ws_client.post(
+        f"/agent/threads/{thread_id}/reply",
+        json={"content": "只应出现一次"}, headers=headers,
+    )
+
+    rows = handoff.get_messages(thread_id)
+    human = [r for r in rows if r["role"] == "human"]
+    assert len(human) == 1
+    assert human[0]["content"] == "只应出现一次"
+    # 历史里每条消息都带 id：前端与推送消息对齐时需要
+    assert all(r.get("id") is not None for r in rows)

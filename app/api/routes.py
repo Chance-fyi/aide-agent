@@ -139,17 +139,24 @@ async def reply_thread(
         raise HTTPException(status_code=403, detail="该会话已由其他坐席接入")
     try:
         # 坐席昵称随消息落库：用户端气泡显示"是谁回复的"
-        ts = handoff.append_message(thread_id, ROLE_HUMAN, body.content, sender_id=agent["id"])
+        saved = handoff.append_message(
+            thread_id, ROLE_HUMAN, body.content, sender_id=agent["id"]
+        )
     except Exception:
         logger.exception("坐席回复落库失败 thread=%s", thread_id)
         raise HTTPException(status_code=503, detail="回复发送失败，请重试") from None
+    if saved is None:
+        raise HTTPException(status_code=503, detail="回复发送失败，请重试")
 
     # 推送在落库之后：推出去的消息必须已经持久化，否则用户端看到的内容
-    # 刷新后会消失（"我明明收到回复了"）
+    # 刷新后会消失（"我明明收到回复了"）。
+    # id 一并下发：消息会经「REST 响应体」和「WS 推送」两条路到前端，
+    # 前端靠这个主键去重——否则发送方自己会看到两条（乐观插入 + 被推送回来）
     message = {
+        "id": saved["id"],
         "role": ROLE_HUMAN,
         "content": body.content,
-        "ts": ts,
+        "ts": saved["ts"],
         # 坐席昵称随事件下发：用户端气泡要显示"是谁在回复我"
         "sender_name": agent["display_name"],
     }
@@ -159,4 +166,6 @@ async def reply_thread(
         {"type": "message", "thread_id": thread_id, "message": message},
         thread_id=thread_id,
     )
-    return {"thread_id": thread_id, "status": status}
+    # 响应体回传权威消息（含服务端 id 与 created_at）：
+    # 前端不再自己拼时间戳，避免本地时钟与服务端时间轴倒挂
+    return {"thread_id": thread_id, "status": status, "message": message}

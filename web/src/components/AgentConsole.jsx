@@ -3,6 +3,7 @@ import {
   API_BASE, AUTH_ROLE, getAuth, clearAuth, authFetch, errorMessage,
 } from "../constants";
 import { createSocket } from "../ws";
+import { mergeMessage } from "../messages";
 import { MessageBubble } from "./MessageBubble";
 import LoginView from "./LoginView";
 
@@ -50,6 +51,7 @@ function timeAgo(iso) {
   if (min < 60) return `${min} 分钟前`;
   return `${Math.floor(min / 60)} 小时前`;
 }
+
 
 /**
  * 外层组件：坐席登录门卫（与 UserChat 同样拆两层以满足 Rules of Hooks）。
@@ -140,9 +142,10 @@ function AgentConsoleInner({ auth, onLogout }) {
           const sel = selectedRef.current;
           if (!sel || ev.thread_id !== sel.thread_id) return;
           const msg = { ...ev.message, thread_id: ev.thread_id };
-          // 两条流都追加（实际只展示其中一条：有用户历史流就展示它）
-          setHistory((prev) => [...prev, msg]);
-          setUserHistory((prev) => (prev === null ? null : [...prev, msg]));
+          // 两条流都并入（实际只展示其中一条：有用户历史流就展示它）。
+          // 必须用 mergeMessage：自己发出的回复也会被广播回来
+          setHistory((prev) => mergeMessage(prev, msg));
+          setUserHistory((prev) => (prev === null ? null : mergeMessage(prev, msg)));
         } else if (ev.type === "error") {
           setError(ev.message);
         }
@@ -258,17 +261,16 @@ function AgentConsoleInner({ auth, onLogout }) {
         alert(errorMessage(data, "回复发送失败，请重试"));
         return;
       }
-      const humanMessage = {
-        role: "human",
-        content: text,
-        ts: new Date().toISOString(),
-        sender_name: auth.display_name || auth.username,
-        thread_id: selected.thread_id,
-      };
+      const data = await resp.json().catch(() => null);
       setReply("");
-      // 乐观更新：不清空/重载整个会话，避免发送后列表闪空再重绘
-      setHistory((prev) => [...prev, humanMessage]);
-      setUserHistory((prev) => (prev === null ? null : [...prev, humanMessage]));
+      // 用服务端回传的权威消息（含 id / created_at）并入列表，
+      // 不再自己拼一条本地消息：本地时间戳会让时间轴倒挂，
+      // 且没有 id 就无法与随后到达的 WS 推送合并，最终表现为两条重复
+      if (data?.message) {
+        const sent = { ...data.message, thread_id: selected.thread_id };
+        setHistory((prev) => mergeMessage(prev, sent));
+        setUserHistory((prev) => (prev === null ? null : mergeMessage(prev, sent)));
+      }
     } catch {
       alert("回复发送失败，请检查网络");
     } finally {

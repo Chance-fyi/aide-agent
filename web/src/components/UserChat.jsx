@@ -3,6 +3,7 @@ import {
   AUTH_ROLE, ROLE, isLiveStatus, getAuth, clearAuth,
 } from "../constants";
 import { createSocket } from "../ws";
+import { mergeMessage } from "../messages";
 import { MessageBubble } from "./MessageBubble";
 import LoginView from "./LoginView";
 
@@ -50,9 +51,12 @@ function UserChatInner({ auth, onLogout }) {
   // 用类而不是内联 style：颜色必须从 token 取，内联写死会绕过设计系统
   const dotTone = !connected ? "dot--muted" : transferred ? "dot--busy" : "dot--ok";
 
-  // 追加一条消息：本地乐观消息与服务端推送都走这里，时间戳口径一致
+  // 并入一条消息：本地乐观消息与服务端推送都走这里。
+  // 用 mergeMessage 按服务端 id 去重——重连补发/双通道到达时不会变成两条
   const appendMessage = useCallback((msg) => {
-    setMessages((prev) => [...prev, { ...msg, ts: msg.ts ?? new Date().toISOString() }]);
+    setMessages((prev) =>
+      mergeMessage(prev, { ...msg, ts: msg.ts ?? new Date().toISOString() }),
+    );
   }, []);
 
   // 建立实时连接（登录态变化时重建；卸载时关闭）

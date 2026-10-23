@@ -32,6 +32,10 @@ class ChatResponse(BaseModel):
 class SessionMessage(BaseModel):
     role: str                   # user / agent / human
     content: str
+    # 消息主键（chat_message.id）：前端据此去重与做稳定 key。
+    # 同一条消息会经 REST 响应体与 WebSocket 推送两条路径到达，
+    # 靠内容/时间匹配不可靠（本地时钟 ≠ 服务端 created_at）
+    id: int | None = None
     ts: str | None = None
     sender_name: str | None = None   # human 消息的坐席昵称（后端 JOIN 得出，用户端展示用）
     thread_id: str | None = None     # 消息所属会话（坐席端历史流里区分"旧会话/当前会话"用）
