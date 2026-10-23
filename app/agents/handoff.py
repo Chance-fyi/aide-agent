@@ -95,20 +95,25 @@ def ensure_table() -> None:
 def append_message(
     thread_id: str, role: str, content: str,
     user_id: str | None = None, sender_id: int | None = None,
-) -> None:
-    """追加一条用户可见的会话记录。
+) -> str | None:
+    """追加一条用户可见的会话记录，返回入库时间（ISO 字符串）。
 
     role 取值见 app.api.chat 的 ROLE_* 常量：user / agent(智能客服) / human(人工坐席)。
     user_id 仅 user 角色消息传入（记录发送者，支持"按用户查消息"）；
     sender_id 仅 human 角色消息传入（坐席账号，展示昵称时 JOIN app_user）。
     失败由调用方决定是否降级（记日志不抛出场景居多）。
+
+    返回 created_at 是为了让 WebSocket 推送的消息带**服务端时间戳**：
+    前端用本地时间乐观插入的话，双端时钟不一致会出现"回复时间早于提问"
+    "的倒挂。取不到时返回 None，前端回退本地时间。
     """
     with _get_conn() as conn:
-        conn.execute(
+        row = conn.execute(
             "INSERT INTO chat_message (thread_id, role, content, user_id, sender_id) "
-            "VALUES (%s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s) RETURNING created_at",
             (thread_id, role, content, user_id, sender_id),
-        )
+        ).fetchone()
+    return row[0].isoformat() if row else None
 
 
 def get_messages(thread_id: str) -> list[dict]:
@@ -178,6 +183,25 @@ def is_live_status(status: str) -> bool:
     """是否处于"转接待处理或处理中"状态（守卫/transferred 标记的统一口径）。"""
     return status in _LIVE_STATUSES
 
+def _notify_status(thread_id: str, status: str) -> None:
+    """状态变更后通知双端：用户端换 UI、坐席端刷队列。
+
+    为什么放在数据层而不是路由层：状态机是"唯一事实源"，任何一次
+    状态变更都必须让两端看到；靠每个调用方记得推送，早晚会漏一处
+    （超时巡检这类后台任务尤其容易忘）。
+
+    延迟导入：core.hub 需要 import handoff（按会话查归属用户），
+    顶层导入会形成循环依赖。推送失败一律吞掉——实时性不能反向
+    拖垮业务写库，客户端重连时靠 ready 快照自愈。
+    """
+    try:
+        from app.core.hub import hub
+
+        hub.push_thread(thread_id, {"type": "status", "thread_id": thread_id, "status": status})
+        hub.push_agents({"type": "queue_changed"})
+    except Exception:
+        logger.debug("状态变更推送失败 thread=%s", thread_id, exc_info=True)
+
 
 def mark_pending_human(thread_id: str, reason: str) -> None:
     """标记会话进入人工排队（幂等：重复转接只更新原因）。"""
@@ -192,6 +216,7 @@ def mark_pending_human(thread_id: str, reason: str) -> None:
             (thread_id, STATUS_QUEUED, reason, STATUS_QUEUED, reason),
         )
     logger.info("会话已转接(排队): thread=%s reason=%s", thread_id, reason)
+    _notify_status(thread_id, STATUS_QUEUED)
 
 
 def agent_accept(thread_id: str, agent_name: str, agent_id: int) -> bool:
@@ -213,6 +238,7 @@ def agent_accept(thread_id: str, agent_name: str, agent_id: int) -> bool:
         ).fetchone()
     if row:
         logger.info("坐席已接入: thread=%s agent=%s", thread_id, agent_name)
+        _notify_status(thread_id, STATUS_IN_SERVICE)
         return True
     return False
 
@@ -264,6 +290,7 @@ def agent_close(thread_id: str, resolution: str, agent_id: int | None = None) ->
         ).fetchone()
     if row:
         logger.info("人工处理结束: thread=%s resolution=%s", thread_id, resolution)
+        _notify_status(thread_id, STATUS_CLOSED)
         return True
     return False
 
@@ -275,6 +302,7 @@ def reset_active(thread_id: str) -> None:
             "UPDATE conversation_status SET status = %s, updated_at = now() WHERE thread_id = %s",
             (STATUS_ACTIVE, thread_id),
         )
+    _notify_status(thread_id, STATUS_ACTIVE)
 
 def get_user_display_name(user_id: int) -> str | None:
     """查用户展示昵称；无此账号/异常返回 None（前端回退"游客"）。"""
@@ -431,4 +459,9 @@ def sweep_timed_out() -> list[str]:
     thread_ids = [r[0] for r in rows]
     if thread_ids:
         logger.info("排队超时回退 %d 个会话: %s", len(thread_ids), thread_ids[:5])
+        # 回退是后台任务触发的，没有请求上下文可以"顺手"通知前端，
+        # 所以必须在这里显式推：用户端要从"排队中"切回"自助"，
+        # 否则界面一直卡在"坐席接入中"等一个不会来的人
+        for tid in thread_ids:
+            _notify_status(tid, STATUS_ACTIVE)
     return thread_ids

@@ -16,6 +16,8 @@ from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
 from app.api.routes import agent_router, router
+from app.api.ws import router as ws_router
+from app.core.config import get_settings
 
 # 日志基础配置：生产部署时由 gunicorn/uvicorn 参数或环境变量接管更细粒度的配置，
 # 这里保证"无论谁启动进程，异常都能以统一格式落到 stderr"
@@ -55,8 +57,6 @@ async def lifespan(app: FastAPI):
     Milvus / Postgres 的连接采用"懒加载"：首次用到才建连，
     避免启动顺序耦合（比如先起后端再起中间件也不报错）。
     """
-    from app.core.config import get_settings
-
     s = get_settings()
     logger.info("LLM: model=%s base_url=%s", s.llm_model, s.llm_base_url)
     logger.info("Milvus: %s | Postgres: %s:%s", s.milvus_uri, s.postgres_host, s.postgres_port)
@@ -90,16 +90,16 @@ app.include_router(router)
 app.include_router(auth_router)
 app.include_router(agent_router)
 app.include_router(chat_router)
+# WebSocket：双端实时推送（/ws/chat 用户端、/ws/agent 坐席端）
+app.include_router(ws_router)
 register_debug_routes(app)  # 调试路由：debug=False 时不注册
 
 # CORS：前端(5173)与后端(8000)端口不同源，浏览器会拦截跨域 fetch。
-# 开发环境放行本地前端端口；生产应改为具体域名列表（通过环境变量注入）
+# 白名单走配置（cors_origins）：WebSocket 握手也要校验 Origin，
+# 两处共用同一份列表，避免"fetch 放行但 WS 被拒"这类不一致
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=get_settings().cors_origin_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )

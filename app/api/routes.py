@@ -17,6 +17,7 @@ from app.api.schemas import (
     SessionMessage,
 )
 from app.core.config import get_settings
+from app.core.hub import hub
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ async def reply_thread(
     thread_id: str = Path(..., pattern=THREAD_ID_PATTERN),
     body: AgentReplyRequest | None = None,
 ):
-    """坐席回复消息：写入会话记录表，用户端轮询拉取展示。
+    """坐席回复消息：写入会话记录表，并通过 WebSocket 推给用户端。
 
     只允许接入者本人在处理中（in_service）状态下回复：
     - queued（未接入）不能回复：接入是占位动作（防多坐席抢单 + 状态推进），
@@ -138,8 +139,24 @@ async def reply_thread(
         raise HTTPException(status_code=403, detail="该会话已由其他坐席接入")
     try:
         # 坐席昵称随消息落库：用户端气泡显示"是谁回复的"
-        handoff.append_message(thread_id, ROLE_HUMAN, body.content, sender_id=agent["id"])
+        ts = handoff.append_message(thread_id, ROLE_HUMAN, body.content, sender_id=agent["id"])
     except Exception:
         logger.exception("坐席回复落库失败 thread=%s", thread_id)
         raise HTTPException(status_code=503, detail="回复发送失败，请重试") from None
+
+    # 推送在落库之后：推出去的消息必须已经持久化，否则用户端看到的内容
+    # 刷新后会消失（"我明明收到回复了"）
+    message = {
+        "role": ROLE_HUMAN,
+        "content": body.content,
+        "ts": ts,
+        # 坐席昵称随事件下发：用户端气泡要显示"是谁在回复我"
+        "sender_name": agent["display_name"],
+    }
+    hub.push_thread(thread_id, {"type": "message", "message": message})
+    # 其他正在看该会话的坐席也要看到（同一坐席的多标签页属边界情况，见 step-39 遗留项）
+    hub.push_agents(
+        {"type": "message", "thread_id": thread_id, "message": message},
+        thread_id=thread_id,
+    )
     return {"thread_id": thread_id, "status": status}

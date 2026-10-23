@@ -1,13 +1,20 @@
-"""核心对话接口。
+"""核心对话处理。
 
 处理顺序（短路优先级）：
 1. 输入安检命中 → 友好拒答，不进 graph（省一次 LLM 调用，不写污染状态）
 2. 已转接（排队中/服务中） → 消息直达人工工作台，不进 graph
 3. 其他 → 正常走 Agent
+
+本模块被两条入口共用：
+- `POST /chat`（REST：脚本/调试/WS 不可用时的兜底）
+- `WS /ws/chat`（前端主链路：回复走推送）
+因此业务编排收在 `process_message` 里，两个入口只做各自的协议适配——
+否则"转接守卫""落库""推送"这些规则会在两处各写一遍，迟早走偏。
 """
 
 import logging
 import uuid
+from dataclasses import dataclass
 
 import openai
 from fastapi import APIRouter, HTTPException, Path
@@ -26,6 +33,7 @@ from app.api.schemas import (
 )
 from app.core import guardrails, tracing
 from app.core.config import get_settings
+from app.core.hub import hub
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +54,18 @@ THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]{1,64}$"
 
 router = APIRouter(tags=["chat"])
 
+@dataclass
+class ChatOutcome:
+    """一次对话处理的结果（与传输层无关的中间结构）。
+
+    为什么不让内部逻辑直接返回 ChatResponse：WS 入口不需要 thread_id
+    之外的 HTTP 语义（也不该抛 HTTP 异常），它要的是"回复内容 + 当前状态"。
+    """
+
+    thread_id: str
+    reply: str          # 要展示给用户的文本；空串 = 无需气泡（坐席已接入）
+    status: str         # 处理后的会话状态
+    transferred: bool   # 是否处于已转接（排队中/服务中）
 
 def _friendly_llm_error(exc: Exception) -> tuple[int, str]:
     """把 LLM 链路的异常翻译成（HTTP 状态码, 用户可读文案）。
@@ -67,7 +87,6 @@ def _friendly_llm_error(exc: Exception) -> tuple[int, str]:
         return 503, "客服服务暂时不可用，请稍后重试"
     return 503, "客服服务暂时不可用，请稍后重试"
 
-
 def _get_thread_status(thread_id: str) -> str:
     """查询会话转接状态，查询失败降级为 active。
 
@@ -80,52 +99,108 @@ def _get_thread_status(thread_id: str) -> str:
         logger.exception("转接状态查询失败，按 active 处理 thread=%s", thread_id)
         return handoff.STATUS_ACTIVE
 
+# ============================================================
+# 落库 + 推送（两条入口共用的"写一条消息"动作）
+# ============================================================
 
-def _save_messages(thread_id: str, *pairs: tuple[str, str], user_id: str | None = None) -> bool:
-    """批量写入会话记录表，返回是否全部成功。
+def _append(
+    thread_id: str, role: str, content: str,
+    user_id: str | None = None, sender_id: int | None = None,
+) -> str | None:
+    """写一条会话记录并返回入库时间；失败向上抛（由调用方决定后果）。"""
+    return handoff.append_message(
+        thread_id, role, content,
+        # 只给用户消息打归属标记；坐席消息带 sender_id（展示"是谁回复的"）
+        user_id if role == ROLE_USER else None,
+        sender_id,
+    )
 
-    user_id 绑定到 user 角色的消息上（消息归属用户，支持按用户查历史）；
-    agent/human 消息属于会话本身，不带归属。
-    调用方按业务决定失败后果：拦截记录落库失败只记日志；
-    用户消息落库失败则必须报错（不能吞掉用户的消息）。
+def _append_safe(thread_id: str, role: str, content: str, user_id: str | None = None) -> str | None:
+    """写一条会话记录，失败只记日志。
+
+    适用场景：记录表抖动不该让用户看不到已经生成好的回复。
     """
     try:
-        for role, content in pairs:
-            # 只给用户消息打归属标记
-            handoff.append_message(thread_id, role, content, user_id if role == ROLE_USER else None)
-        return True
+        return _append(thread_id, role, content, user_id)
     except Exception:
-        logger.exception(
-            "会话记录落库失败 thread=%s roles=%s",
-            thread_id, [r for r, _ in pairs],
-        )
-        return False
+        logger.exception("会话记录落库失败 thread=%s role=%s", thread_id, role)
+        return None
 
+def _notify_agents_message(
+    thread_id: str, role: str, content: str, ts: str | None, user_id: int | None = None,
+) -> None:
+    """把新消息推给正在看这个会话的坐席（替代坐席端的 4 秒轮询）。"""
+    hub.push_agents(
+        {
+            "type": "message",
+            "thread_id": thread_id,
+            # user_id 让坐席端能判断"这条消息属不属于我正在看的那个用户"
+            # （坐席详情面板展示的是跨 thread 的用户完整历史流）
+            "user_id": user_id,
+            "message": {"role": role, "content": content, "ts": ts},
+        },
+        thread_id=thread_id,
+    )
 
-def _handle_guarded(thread_id: str, message: str, category: str, user_id: str | None = None) -> ChatResponse:
+def _push_user_message(
+    user_id: int | None, role: str, content: str, ts: str | None, sender_name: str | None = None,
+) -> None:
+    """把一条消息推给用户端（WS 入口专用；REST 入口用响应体回传）。"""
+    if user_id is None:
+        return
+    hub.push_user(user_id, {
+        "type": "message",
+        "message": {"role": role, "content": content, "ts": ts, "sender_name": sender_name},
+    })
+
+# ============================================================
+# 三条处理分支
+# ============================================================
+
+def _handle_guarded(
+    thread_id: str, message: str, category: str,
+    user_id: int | None = None, *, push_reply: bool = False,
+) -> ChatOutcome:
     """输入安检命中后的处理：友好拒答 + 记录留痕（安全事件必须可追溯）。"""
     guardrails.log_rejection(thread_id, category, message)
     reply = guardrails.refusal_reply(category)
     # 拦截记录也进会话记录表：坐席端能看到用户发了什么、系统为何拦截
-    _save_messages(thread_id, (ROLE_USER, message), (ROLE_AGENT, reply), user_id=user_id)
-    return ChatResponse(message=reply, thread_id=thread_id, transferred=False)
+    ts_user = _append_safe(thread_id, ROLE_USER, message, user_id)
+    _notify_agents_message(thread_id, ROLE_USER, message, ts_user, user_id)
+    ts_agent = _append_safe(thread_id, ROLE_AGENT, reply)
+    _notify_agents_message(thread_id, ROLE_AGENT, reply, ts_agent)
+    if push_reply:
+        _push_user_message(user_id, ROLE_AGENT, reply, ts_agent)
+    # 状态用真实值而非硬编码 active：安检只是短路了本轮问答，
+    # 会话可能仍在排队中，前端 UI 不该被这一轮错误地切回"自助"
+    status = _get_thread_status(thread_id)
+    return ChatOutcome(thread_id, reply, status, handoff.is_live_status(status))
 
-
-def _handle_live(thread_id: str, message: str, status: str, user_id: str | None = None) -> ChatResponse:
+def _handle_live(
+    thread_id: str, message: str, status: str,
+    user_id: int | None = None, *, push_reply: bool = False,
+) -> ChatOutcome:
     """已转接会话的处理：用户消息直达人工工作台，不再消耗 LLM。
 
     应答话术只回给前端、不落库——它不是对话内容，落库会在坐席端制造噪音；
     代价是刷新后临时应答消失，但用户消息本身已在记录表里，可接受。
     """
-    if not _save_messages(thread_id, (ROLE_USER, message), user_id=user_id):
+    try:
+        ts = _append(thread_id, ROLE_USER, message, user_id)
+    except Exception:
         # 落库失败不能吞掉用户的消息：让前端知道发送失败，提示重试
+        logger.exception("会话记录落库失败 thread=%s", thread_id)
         raise HTTPException(status_code=503, detail="消息发送失败，请重试") from None
+    # 即时推给坐席：这是"用户补发消息"的主链路，晚 4 秒都可能让坐席漏看
+    _notify_agents_message(thread_id, ROLE_USER, message, ts, user_id)
+
     # 排队中：回一句确认话术让用户知道消息没丢；
-    # 坐席已接入：不再回机器人应答（message 置空，前端不渲染气泡）——
+    # 坐席已接入：不再回机器人应答（reply 置空，前端不渲染气泡）——
     # 用户此时在和人工对话，每次发言都被机器人"已收到"刷屏反而干扰
     ack = _QUEUED_ACK if status == handoff.STATUS_QUEUED else ""
-    return ChatResponse(message=ack, thread_id=thread_id, transferred=True)
-
+    if push_reply and ack:
+        _push_user_message(user_id, ROLE_AGENT, ack, None)
+    return ChatOutcome(thread_id, ack, status, True)
 
 async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None) -> str:
     """执行 Agent 图并提取纯文本回复；LLM 链路异常翻译为友好 HTTP 错误。"""
@@ -159,6 +234,84 @@ async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None
         return "抱歉，刚才的回复没有生成成功，请您再试一次。"
     return text
 
+# ============================================================
+# 业务编排入口（REST / WS 共用）
+# ============================================================
+
+def _resolve_thread(user: dict | None, thread_id: str | None) -> str:
+    """解析本轮消息所属的 thread_id。
+
+    登录用户的 thread_id 由服务端解析（前端传值被忽略）：
+    按账号反查最近的聊天流，没有则新建——"一个用户一条聊天记录"，
+    换设备/清缓存/退出重登后发消息即自动接回同一条流，消息不丢。
+    thread_id 因此成为纯实现细节，前端无需再持久化它。
+    """
+    if user is None:
+        # 匿名用户：维持旧行为，前端传什么用什么（localStorage 续接）
+        return thread_id or str(uuid.uuid4())
+
+    tid = handoff.get_user_current_thread(user["id"])
+    if tid and handoff.get_status(tid) == handoff.STATUS_CLOSED:
+        # 当前流已 closed（上一次人工服务结束）则开新 thread：
+        # 新问题从干净的 Agent 上下文开始，旧 thread 的 Checkpointer
+        # 快照与 chat_message 记录都保留，后续排查/审计有据可查
+        tid = None
+    if not tid:
+        tid = str(uuid.uuid4())
+    handoff.set_thread_user(tid, user["id"])
+    return tid
+
+async def process_message(
+    message: str,
+    user: dict | None,
+    thread_id: str | None = None,
+    *,
+    push_reply: bool = False,
+) -> ChatOutcome:
+    """一轮对话的完整业务处理（落库 + 推送 + 生成回复）。
+
+    push_reply：回复是否通过 WebSocket 推给用户。
+    REST 入口传 False（回复走响应体，避免同一个气泡到两次）；
+    WS 入口传 True（回复没有响应体可回，只能推）。
+    """
+    thread_id = _resolve_thread(user, thread_id)
+    # 匿名用户无归属，user 消息不带 user_id；登录用户统一取账号 ID
+    uid = user["id"] if user else None
+
+    # 输入安检（API 层短路）
+    if get_settings().input_guardrail:
+        category = guardrails.check_message(message)
+        if category:
+            return _handle_guarded(thread_id, message, category, uid, push_reply=push_reply)
+
+    # 已转接会话：用户消息直达人工
+    status = _get_thread_status(thread_id)
+    if handoff.is_live_status(status):
+        return _handle_live(thread_id, message, status, uid, push_reply=push_reply)
+
+    # 正常自助问答。
+    # 用户消息**先落库再调 Agent**（与原实现相反），两个收益：
+    # 1. 坐席端不必等 LLM 跑完才看到"用户在等"，实时感来自这里
+    # 2. LLM 超时/失败时用户消息不会凭空消失（history 里留有据可查）
+    ts_user = _append_safe(thread_id, ROLE_USER, message, uid)
+    _notify_agents_message(thread_id, ROLE_USER, message, ts_user, uid)
+
+    text = await _invoke_agent(thread_id, message, user_id=uid)
+    ts_agent = _append_safe(thread_id, ROLE_AGENT, text)
+    _notify_agents_message(thread_id, ROLE_AGENT, text, ts_agent)
+    if push_reply:
+        _push_user_message(uid, ROLE_AGENT, text, ts_agent)
+
+    # 转接可能在 Agent 执行中发生（LLM 调了转接工具 / 关键词兜底）：
+    # 重新查一次状态。查询失败降级为"未转接"——代价是前端少一次提示，可接受。
+    # 状态本身的推送由 handoff 状态机负责（见 handoff._notify_status），
+    # 这里只取结果给响应体用
+    status = _get_thread_status(thread_id)
+    return ChatOutcome(thread_id, text, status, handoff.is_live_status(status))
+
+# ============================================================
+# REST 路由（保留：脚本/调试/WS 不可用时兜底）
+# ============================================================
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
@@ -167,60 +320,31 @@ async def chat(
 ) -> ChatResponse:
     """核心对话接口：一个问题进，一个回复出。
 
-    thread_id 语义：
-    - 不传：服务端生成新会话 ID
-    - 传入：续接该会话的多轮上下文（Checkpointer 自动恢复历史）
-
     认证为"可选"：未登录仍可自助问答（匿名会话，坐席端显示为游客）；
     登录用户则会话绑定到账号，坐席端才能看到"谁在提问"。
-
-    登录用户的 thread_id 由服务端解析（前端传值被忽略）：
-    按账号反查最近的聊天流，没有则新建——"一个用户一条聊天记录"，
-    换设备/清缓存/退出重登后发消息即自动接回同一条流，消息不丢。
-    thread_id 因此成为纯实现细节，前端无需再持久化它。
     """
-    if user is not None:
-        # 服务端解析当前聊天流：优先复用，无则新建并立即绑定归属。
-        # 当前流已 closed（上一次人工服务结束）则开新 thread：
-        # 新问题从干净的 Agent 上下文开始，旧 thread 的 Checkpointer
-        # 快照与 chat_message 记录都保留，后续排查/审计有据可查
-        thread_id = handoff.get_user_current_thread(user["id"])
-        if thread_id and handoff.get_status(thread_id) == handoff.STATUS_CLOSED:
-            thread_id = None
-        if not thread_id:
-            thread_id = str(uuid.uuid4())
-        handoff.set_thread_user(thread_id, user["id"])
-    else:
-        # 匿名用户：维持旧行为，前端传什么用什么（localStorage 续接）
-        thread_id = req.thread_id or str(uuid.uuid4())
-
-    # 匿名用户无归属，user 消息不带 user_id；登录用户统一取账号 ID
-    uid = user["id"] if user else None
-
-    # 输入安检（API 层短路）
-    if get_settings().input_guardrail:
-        category = guardrails.check_message(req.message)
-        if category:
-            return _handle_guarded(thread_id, req.message, category, user_id=uid)
-
-    # 已转接会话：用户消息直达人工
-    status = _get_thread_status(thread_id)
-    if handoff.is_live_status(status):
-        return _handle_live(thread_id, req.message, status, user_id=uid)
-
-    # 正常自助问答：Agent 生成回复后落记录表（跨天恢复/坐席端查看的统一数据源）
-    text = await _invoke_agent(thread_id, req.message, user_id=uid)
-    # 落库失败只记日志：回复本身已生成，因记录表抖动而报错得不偿失
-    _save_messages(thread_id, (ROLE_USER, req.message), (ROLE_AGENT, text), user_id=uid)
-
-    # 转接可能在 Agent 执行中发生（LLM 调了转接工具）：重新查一次状态。
-    # 查询失败降级为"未转接"——代价是前端 UI 少一次提示，可接受
+    outcome = await process_message(req.message, user, req.thread_id)
     return ChatResponse(
-        message=text,
-        thread_id=thread_id,
-        transferred=handoff.is_live_status(_get_thread_status(thread_id)),
+        message=outcome.reply,
+        thread_id=outcome.thread_id,
+        transferred=outcome.transferred,
     )
 
+def build_user_snapshot(user_id: int) -> dict:
+    """用户端连接建立时的状态快照（WS 的 ready 事件，也是 /chat/my/history 的数据源）。
+
+    为什么用"全量快照 + 增量推送"而不是"纯增量"：
+    断线重连、换设备、多端同时在线都会让增量流不完整，
+    每次连接都给一份全量真相，客户端不需要自己补齐缺口。
+    """
+    messages = handoff.get_user_messages(user_id)
+    tid = handoff.get_user_current_thread(user_id)
+    status = handoff.get_status(tid) if tid else handoff.STATUS_ACTIVE
+    return {
+        "thread_id": tid or "",
+        "status": status,
+        "messages": [SessionMessage(**m).model_dump() for m in messages],
+    }
 
 @router.get("/chat/my/history", response_model=SessionHistoryResponse)
 async def my_history(user: CurrentUser) -> SessionHistoryResponse:
@@ -230,16 +354,7 @@ async def my_history(user: CurrentUser) -> SessionHistoryResponse:
     按时间序），登录后无论换设备还是清 localStorage 都能看到完整聊天流。
     status 取当前活跃 thread 的状态（排队/服务中状态跨设备也正确）。
     """
-    messages = handoff.get_user_messages(user["id"])
-    status = handoff.STATUS_ACTIVE
-    tid = handoff.get_user_current_thread(user["id"])
-    if tid:
-        status = handoff.get_status(tid)
-    return SessionHistoryResponse(
-        thread_id=tid or "",
-        status=status,
-        messages=[SessionMessage(**m) for m in messages],
-    )
+    return SessionHistoryResponse(**build_user_snapshot(user["id"]))
 
 @router.get("/chat/sessions", response_model=SessionListResponse)
 async def list_sessions(user: CurrentUser) -> SessionListResponse:
@@ -267,7 +382,6 @@ def _messages_from_checkpointer(state) -> list[SessionMessage]:
         # 它是 Agent 内部的"工具调用记录"，不是要展示给用户的对话内容
         and not (isinstance(m, AIMessage) and not m.text.strip())
     ]
-
 
 @router.get("/chat/{thread_id}/history", response_model=SessionHistoryResponse)
 async def history(

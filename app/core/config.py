@@ -103,6 +103,17 @@ class Settings(BaseSettings):
     # 违禁词追加表（逗号分隔），与内置默认表叠加，业务无需改代码即可增删
     blocked_words: str = ""
 
+    # ----- 跨域白名单（HTTP CORS 与 WebSocket 握手共用） -----
+    # 为什么合并成一份：WebSocket 不受 CORS 机制约束，浏览器不会替我们拦截，
+    # 必须由服务端自己校验 Origin。两处用同一个列表，才不会出现
+    # "fetch 能过、WS 被拒"或反过来"WS 放行了 fetch 不放行的源"这种不一致
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """逗号分隔的白名单拆成列表（与 transfer_keyword_list 同款写法）。"""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
     @property
     def postgres_dsn(self) -> str:
         """LangGraph Checkpointer 需要的连接串格式。"""

@@ -1,22 +1,25 @@
-import { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import {
-  API_BASE, AUTH_ROLE, ROLE, POLL_INTERVAL_MS, isLiveStatus,
-  getAuth, clearAuth, authFetch, errorMessage,
+  AUTH_ROLE, ROLE, isLiveStatus, getAuth, clearAuth,
 } from "../constants";
+import { createSocket } from "../ws";
 import { MessageBubble } from "./MessageBubble";
 import LoginView from "./LoginView";
 
 /**
- * 用户端聊天视图。
+ * 用户端聊天视图（WebSocket 实时通道）。
  *
- * 与后端的协议（见 app/api/schemas.py）：
- * - POST /chat { message, thread_id? } → { message, thread_id, transferred }
- * - GET  /chat/{thread_id}/history → { thread_id, status, messages: [{role, content}] }
+ * 协议（见 app/api/ws.py）：
+ *   发 → {"type":"message","content":"..."} / {"type":"ping"}
+ *   收 → ready（历史 + 转接状态全量快照）/ message（客服或坐席回复）
+ *        / status（转接状态变化）/ error（友好错误）/ pong
  *
- * 会话连续性设计：
- * - thread_id 存 localStorage，跨天/刷新后重进自动恢复历史消息与转接状态
- * - 转人工后输入框不再禁用：用户补充消息直达坐席工作台（后端落会话记录表）
- * - 前端轮询 history：用户能看到坐席的回复（模拟长轮询，SSE 属后续迭代）
+ * 为什么把轮询换成 WS：轮询下坐席回复的可见延迟最多 4 秒（且空转请求不断），
+ * 双端"收到消息"的体验都取决于客户端碰巧什么时候拉了一次。推送让延迟
+ * 回到网络往返量级，同时 ready 快照保证断线重连不丢消息。
+ *
+ * 会话连续性：thread_id 由服务端按登录账号解析（"一个用户一条聊天记录"），
+ * 前端不持有它——换设备/清缓存/退出重登都会自动接回同一条流。
  */
 
 // 快捷提问：降低新用户输入门槛，也顺带引导到知识库覆盖率高的问题
@@ -37,61 +40,72 @@ function UserChat() {
 }
 
 function UserChatInner({ auth, onLogout }) {
-  const [messages, setMessages] = useState([]);       // { role: 'user'|'agent'|'human', content }
+  const [messages, setMessages] = useState([]);       // { role: 'user'|'agent'|'human', content, ts }
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);      // 等待后端回复中
+  const [loading, setLoading] = useState(false);      // 等待回复中（"输入中"提示）
   const [transferred, setTransferred] = useState(false); // 是否已转人工
-  const [restored, setRestored] = useState(false);    // 历史恢复是否完成（避免恢复期间闪欢迎页）
+  const [restored, setRestored] = useState(false);    // 历史是否已就绪（避免恢复期间闪欢迎页）
+  const [connected, setConnected] = useState(false);  // WS 是否已连上（断开时提示并阻止发送）
   const listRef = useRef(null);                       // 自动滚到底部用
   const inputRef = useRef(null);                      // 发送完成后焦点回输入框
-  const loadingRef = useRef(false);                   // 轮询跳过发送中的请求（闭包里的 loading 会过期）
-  const transferredRef = useRef(false);               // 发送期间同步读取当前转接状态，控制机器人 typing 显示
+  const socketRef = useRef(null);
 
-  loadingRef.current = loading;
-  transferredRef.current = transferred;
-
-  const onAuthExpired = onLogout;   // Token 失效：清登录态回登录页
-
-  // 挂载时恢复聊天记录：直接按账号查（/chat/my/history），
-  // 与设备/localStorage 无关——退出重登、换设备都能找回完整聊天流
-  useEffect(() => {
-    (async () => {
-      try {
-        const resp = await authFetch(
-          `${API_BASE}/chat/my/history`, {}, AUTH_ROLE.USER, onAuthExpired,
-        );
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        setMessages(data.messages ?? []);
-        setTransferred(isLiveStatus(data.status));
-      } catch {
-        // 加载失败不阻断使用：按空聊天流处理，下轮轮询会再同步
-      } finally {
-        setRestored(true);
-      }
-    })();
+  // 追加一条消息：本地乐观消息与服务端推送都走这里，保证格式与时间戳口径一致
+  const appendMessage = useCallback((msg) => {
+    setMessages((prev) => [
+      ...prev,
+      { ...msg, ts: msg.ts ?? new Date().toISOString() },
+    ]);
   }, []);
 
-  // 轮询拉取会话记录：主要为了收到人工坐席的回复。
-  // 发送中跳过本轮，避免轮询结果覆盖本地乐观消息
+  // 建立实时连接（登录态变化时重建；卸载时关闭）
   useEffect(() => {
-    const timer = setInterval(async () => {
-      if (loadingRef.current) return;
-      try {
-        const resp = await authFetch(
-          `${API_BASE}/chat/my/history`, {}, AUTH_ROLE.USER, onAuthExpired,
-        );
-        if (!resp.ok) return;
-        const data = await resp.json();
-        const incoming = data.messages ?? [];
-        setMessages((prev) => incoming.length < prev.length ? prev : incoming);
-        setTransferred(isLiveStatus(data.status));
-      } catch {
-        // 轮询失败静默：下一轮自动重试，不打扰用户
-      }
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, []);
+    const socket = createSocket({
+      path: "/ws/chat",
+      token: auth.token,
+      onOpen: () => setConnected(true),
+      onClose: () => setConnected(false),
+      onAuthError: () => {
+        // Token 失效：清登录态回登录页（ws.js 不会再重连，避免无效重试）
+        clearAuth(AUTH_ROLE.USER);
+        onLogout();
+      },
+      onEvent: (ev) => {
+        switch (ev.type) {
+          case "ready":
+            // 全量快照：首次连接与每次重连都靠它对齐（历史 + 转接状态）。
+            // 用它替换整个列表而不是追加，重连后才不会出现重复消息
+            setMessages(ev.messages ?? []);
+            setTransferred(isLiveStatus(ev.status));
+            setRestored(true);
+            setLoading(false);
+            break;
+          case "message":
+            appendMessage(ev.message);
+            // 客服/坐席的回复到了 → 收起"输入中"。
+            // 用户自己的消息不会推回来（本地已乐观插入），所以这里必然是对方的
+            if (ev.message?.role !== ROLE.USER) setLoading(false);
+            break;
+          case "status":
+            setTransferred(isLiveStatus(ev.status));
+            break;
+          case "error":
+            // 后端给的是可操作文案（校验失败/LLM 故障），直接展示，不吞成"网络异常"
+            appendMessage({ role: ROLE.AGENT, content: ev.message });
+            setLoading(false);
+            break;
+          default:
+            break;   // pong 等心跳应答无需处理
+        }
+      },
+    });
+    socketRef.current = socket;
+    return () => {
+      socket.close();
+      socketRef.current = null;
+    };
+    // 只依赖 token：登录态不变就不该重建连接（否则每次渲染都重连）
+  }, [auth.token, appendMessage, onLogout]);
 
   // 消息列表始终钉在最新消息，滚动容器 CSS 禁用平滑滚动与浏览器锚定。
   useLayoutEffect(() => {
@@ -99,47 +113,25 @@ function UserChatInner({ auth, onLogout }) {
     if (el) el.scrollTop = el.scrollHeight;
   });
 
-  async function send(textArg) {
+  function send(textArg) {
     const text = (textArg ?? input).trim();
     if (!text || loading) return;   // 转人工后仍可发消息，只拦"发送中"
 
-    // 乐观更新：立刻显示用户消息（ts 用客户端时间，不等后端落库返回——
-    // 否则发送后要等轮询才出现时间，且本地时钟与服务器误差可忽略）
-    setMessages((prev) => [...prev, { role: "user", content: text, ts: new Date().toISOString() }]);
+    const socket = socketRef.current;
+    // 连接断开时明确告知而不是静默失败：用户以为发出去了、其实没发，
+    // 是聊天类产品最伤体验的错觉之一
+    if (!socket || !socket.send({ type: "message", content: text })) {
+      appendMessage({ role: ROLE.AGENT, content: "连接已断开，正在重连，请稍后重新发送。" });
+      return;
+    }
+
+    // 乐观更新：立刻显示用户消息（ts 用客户端时间；服务端不会把它推回来，
+    // 所以不会重复。重连后由 ready 快照替换为服务端时间）
+    appendMessage({ role: ROLE.USER, content: text });
     setInput("");
     setLoading(true);
-
-    try {
-      const resp = await authFetch(`${API_BASE}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
-        // thread_id 由服务端按登录账号解析（"一个用户一条聊天记录"），
-        // 前端不再持有/持久化它
-      }, AUTH_ROLE.USER, onAuthExpired);
-      if (!resp.ok) {
-        // 后端 503 等会带 detail 文案，优先展示给用户而非笼统的"网络异常"
-        const data = await resp.json().catch(() => null);
-        throw new Error(errorMessage(data, `网络异常（HTTP ${resp.status}），请稍后重试`));
-      }
-      const data = await resp.json();
-
-      setTransferred(data.transferred);     // 转接后切换状态 UI（输入不再禁用）
-      // 坐席已接入后后端返回空 message（不再刷机器人应答），前端不渲染空气泡
-      if (data.message) {
-        setMessages((prev) => [...prev, { role: ROLE.AGENT, content: data.message, ts: new Date().toISOString() }]);
-      }
-    } catch (err) {
-      // 网络失败/后端 503：友好提示而非白屏；detail 里是后端给的可操作文案
-      setMessages((prev) => [
-        ...prev,
-        { role: ROLE.AGENT, content: err.message || "网络异常，请稍后重试。", ts: new Date().toISOString() },
-      ]);
-    } finally {
-      setLoading(false);
-      // preventScroll：聚焦时禁止浏览器把焦点元素滚进视野（可能引发布局跳动）
-      inputRef.current?.focus({ preventScroll: true });
-    }
+    // preventScroll：聚焦时禁止浏览器把焦点元素滚进视野（可能引发布局跳动）
+    inputRef.current?.focus({ preventScroll: true });
   }
 
   return (
@@ -150,7 +142,11 @@ function UserChatInner({ auth, onLogout }) {
           <div>
             <h1>舒心购智能客服</h1>
             <span className="subtitle">
-              {transferred ? "人工客服会话中" : "在线 · 有什么可以帮您？"}
+              {!connected
+                ? "连接中…"
+                : transferred
+                  ? "人工客服会话中"
+                  : "在线 · 有什么可以帮您？"}
             </span>
           </div>
         </div>

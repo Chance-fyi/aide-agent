@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 import {
-  API_BASE, AUTH_ROLE, POLL_INTERVAL_MS, isLiveStatus,
-  getAuth, clearAuth, authFetch, errorMessage,
+  API_BASE, AUTH_ROLE, getAuth, clearAuth, authFetch, errorMessage,
 } from "../constants";
+import { createSocket } from "../ws";
 import { MessageBubble, agentViewBubbleClass } from "./MessageBubble";
 import LoginView from "./LoginView";
 
@@ -10,12 +10,19 @@ import LoginView from "./LoginView";
  * 坐席端控制台（模拟坐席工作台）。
  *
  * 与后端的协议：
- * - GET  /agent/threads                      → { threads: [{thread_id, status, reason, agent_name, updated_at}] }
- * - GET  /chat/{thread_id}/history           → { thread_id, status, messages: [{role, content}] }
+ * - WS /ws/agent
+ *   收 → ready（队列全量快照）/ queue_changed（队列有变，重拉）
+ *        / message（正在查看的会话有新消息）/ error / pong
+ *   发 → {"type":"watch","thread_id":"..."}（订阅当前查看的会话）/ ping
+ * - GET  /agent/threads                      → 队列（按坐席过滤，故仍走 REST）
+ * - GET  /chat/{thread_id}/history           → 会话历史
  * - POST /agent/threads/{thread_id}/accept   → 接入（queued → in_service）
  * - POST /agent/threads/{thread_id}/close    → 结束（→ closed）
+ * - POST /agent/threads/{thread_id}/reply    → 回复（落库后服务端推给用户端）
  *
- * 队列用轮询刷新（MVP 够用，SSE/WebSocket 属于后续流式迭代范围）。
+ * 为什么队列用"信号 + 重拉"而不是直接推列表：队列是按坐席过滤的
+ * （in_service 只对接入者可见），推列表要给每条连接算一份；
+ * 推信号让客户端用同一个 REST 接口取自己那份，过滤口径只有一处。
  */
 
 const STATUS_LABEL = {
@@ -54,7 +61,7 @@ function AgentConsoleInner({ auth, onLogout }) {
   const [error, setError] = useState("");
   // 当前查看的会话：{thread_id, status}。存状态对象而非裸 ID，
   // 因为操作按钮按状态显隐（queued→接入 / in_service→结束），
-  // 队列轮询时同步刷新选中会话的状态，避免按钮与实际状态脱节
+  // 队列刷新时同步更新选中会话的状态，避免按钮与实际状态脱节
   const [selected, setSelected] = useState(null);
   const [history, setHistory] = useState([]);       // 当前会话的消息
   // 用户完整历史流：跨 thread 合并（含当前会话与以前会话）。
@@ -62,9 +69,35 @@ function AgentConsoleInner({ auth, onLogout }) {
   const [userHistory, setUserHistory] = useState(null);
   const [reply, setReply] = useState("");           // 坐席回复用户的输入
   const [note, setNote] = useState("");             // 结束处理时的结果备注
-  const [acting, setActing] = useState(false);      // accept/close 请求进行中
+  const [acting, setActing] = useState(false);      // accept/close/reply 请求进行中
+  const [connected, setConnected] = useState(false); // WS 是否已连上
   const listRef = useRef(null);
-  const pollRef = useRef(null);
+  const socketRef = useRef(null);
+  // 事件回调里要读"当前选中的会话"，但回调在建立连接时就被闭包捕获了。
+  // 用 ref 存一份最新的，回调里读 ref 才不会拿到过期值。
+  // 赋值放 effect 而不是渲染期：渲染期写 ref 在并发渲染下可能被丢弃的
+  // 那次渲染写脏（React 官方不推荐，oxlint 也会告警）
+  const selectedRef = useRef(null);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
+  // 队列快照 → state，并同步选中会话的状态（多坐席并发场景）：
+  // - 会话已从队列消失：若不是自己刚关闭的，说明被其他坐席接走/关闭，
+  //   标记为 locked 展示"其他坐席处理中"（没有操作按钮与回复栏）
+  // - 会话还在队列里：以队列返回的最新状态为准（按钮显隐跟着变）
+  const applyQueue = useCallback((list) => {
+    setThreads(list);
+    setError("");
+    setSelected((sel) => {
+      if (!sel) return null;
+      const found = list.find((t) => t.thread_id === sel.thread_id);
+      if (found) return { ...sel, ...found };
+      return sel.status === "locked" || sel.status === "closed"
+        ? sel
+        : { ...sel, status: "locked" };
+    });
+  }, []);
 
   const refreshQueue = useCallback(async () => {
     try {
@@ -74,32 +107,56 @@ function AgentConsoleInner({ auth, onLogout }) {
       if (resp.status === 401) return;   // authFetch 已清登录态，组件将回到登录页
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
-      setThreads(data.threads ?? []);
-      setError("");
-      // 同步选中会话的最新状态（多坐席并发场景）：
-      // - 会话已从队列消失：若不是自己刚关闭的，说明被其他坐席接走/关闭，
-      //   标记为 locked 展示"其他坐席处理中"（没有操作按钮与回复栏）
-      // - 会话还在队列里：以队列返回的最新状态为准（按钮显隐跟着变）
-      setSelected((sel) => {
-        if (!sel) return null;
-        const found = data.threads.find((t) => t.thread_id === sel.thread_id);
-        if (found) return { ...sel, ...found };
-        return sel.status === "locked" || sel.status === "closed"
-          ? sel
-          : { ...sel, status: "locked" };
-      });
+      applyQueue(data.threads ?? []);
     } catch {
-      // 轮询失败不打断页面，只展示提示，下一轮自动重试
+      // 拉取失败不打断页面，只展示提示（WS 的 queue_changed 会再触发一次）
       setError("队列刷新失败，正在重试…");
     }
-  }, []);
+  }, [applyQueue, onLogout]);
 
-  // 队列轮询：4 秒一次，组件卸载时清理定时器
+  // 实时通道：队列变化信号 + 当前会话的新消息
   useEffect(() => {
-    refreshQueue();
-    pollRef.current = setInterval(refreshQueue, POLL_INTERVAL_MS);
-    return () => clearInterval(pollRef.current);
-  }, [refreshQueue]);
+    const socket = createSocket({
+      path: "/ws/agent",
+      token: auth.token,
+      onOpen: () => setConnected(true),
+      onClose: () => setConnected(false),
+      onAuthError: () => {
+        clearAuth(AUTH_ROLE.AGENT);
+        onLogout();
+      },
+      onEvent: (ev) => {
+        if (ev.type === "ready") {
+          applyQueue(ev.threads ?? []);
+        } else if (ev.type === "queue_changed") {
+          // 只推信号不推列表：按坐席过滤的逻辑留在后端一个地方
+          refreshQueue();
+        } else if (ev.type === "message") {
+          // 只处理"正在查看的会话"：其他会话的消息不打扰当前阅读
+          const sel = selectedRef.current;
+          if (!sel || ev.thread_id !== sel.thread_id) return;
+          const msg = { ...ev.message, thread_id: ev.thread_id };
+          // 两条流都追加（实际只展示其中一条：有用户历史流就展示它）
+          setHistory((prev) => [...prev, msg]);
+          setUserHistory((prev) => (prev === null ? null : [...prev, msg]));
+        } else if (ev.type === "error") {
+          setError(ev.message);
+        }
+      },
+    });
+    socketRef.current = socket;
+    return () => {
+      socket.close();
+      socketRef.current = null;
+    };
+  }, [auth.token, applyQueue, refreshQueue, onLogout]);
+
+  // 订阅当前查看的会话：坐席打开哪一单，服务端就把那一单的消息推过来
+  useEffect(() => {
+    const threadId = selected?.thread_id;
+    if (!threadId) return;
+    socketRef.current?.send({ type: "watch", thread_id: threadId });
+  }, [selected?.thread_id]);
 
   // 只在显示消息数量变化时贴底；acting 等无关状态更新不碰滚动位置
   const previousVisibleCount = useRef(0);
@@ -111,33 +168,7 @@ function AgentConsoleInner({ auth, onLogout }) {
     el.scrollTop = el.scrollHeight;
   }, [history, userHistory]);
 
-  // 轮询选中会话的消息：用户在等待期间补发的消息要能被坐席看到。
-  // 优先拉用户完整历史流（跨 thread 合并，含当前会话）；匿名会话无归属，
-  // 回退拉当前 thread 的 history。与队列轮询同频（4s），查询轻量
-  useEffect(() => {
-    const threadId = selected?.thread_id;
-    if (!threadId) return;
-    const timer = setInterval(async () => {
-      try {
-        const url = userHistory !== null
-          ? `${API_BASE}/agent/threads/${threadId}/user_history`
-          : `${API_BASE}/chat/${threadId}/history`;
-        const resp = await authFetch(url, {}, AUTH_ROLE.AGENT, onLogout);
-        if (!resp.ok) return;
-        const data = await resp.json();
-        if (userHistory !== null) {
-          setUserHistory(data.messages ?? []);
-        } else {
-          setHistory(data.messages ?? []);
-        }
-      } catch {
-        // 轮询失败静默：下轮重试
-      }
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [selected, userHistory]);
-
-  // 加载用户完整历史流（打开会话时调用一次；之后轮询续接）。
+  // 加载用户完整历史流（打开会话时调用一次）。
   // 匿名会话（无归属用户）返回空列表，保持 null 以便回退到 thread history
   async function loadUserHistory(threadId) {
     try {
@@ -205,8 +236,8 @@ function AgentConsoleInner({ auth, onLogout }) {
     }
   }
 
-  // 坐席回复：写进会话记录表，用户端轮询拉取展示。
-  // 回复后立即刷新本地历史，让坐席马上看到自己刚发的内容
+  // 坐席回复：服务端落库后通过 WebSocket 推给用户端。
+  // 本地立即追加，坐席不必等推送回来才看到自己发的内容
   async function sendReply() {
     const text = reply.trim();
     if (!selected || !text || acting) return;
@@ -260,6 +291,7 @@ function AgentConsoleInner({ auth, onLogout }) {
             退出
           </button>
         </div>
+        {!connected && <div className="queue-error">实时连接已断开，正在重连…</div>}
         {error && <div className="queue-error">{error}</div>}
         <div className="queue-list">
           {threads.length === 0 && !error && (

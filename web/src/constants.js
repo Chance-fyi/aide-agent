@@ -4,6 +4,11 @@
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
+// WebSocket 基地址：由 HTTP 基地址推导（http→ws / https→wss）。
+// 不单独配一份 VITE_WS_BASE：两地址永远同源，多一个配置项就多一个
+// "部署换了域名但只改了其中一份"的故障面
+export const API_WS_BASE = API_BASE.replace(/^http/, "ws");
+
 // 会话记录角色（chat_message.role 取值）：
 // agent = 智能客服，human = 人工坐席，两者分立以便双端区分展示气泡
 export const ROLE = {
@@ -27,9 +32,6 @@ export function isLiveStatus(status) {
 
 // thread_id 本地持久化键：同一浏览器跨天回来自动续接上次会话
 export const STORAGE_KEY = "shuxingou_thread_id";
-
-// 轮询间隔（毫秒）：坐席回复/用户补发消息的可见延迟上限
-export const POLL_INTERVAL_MS = 4000;
 
 // ---------- 登录认证（step-22） ----------
 
