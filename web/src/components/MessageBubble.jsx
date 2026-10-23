@@ -1,44 +1,32 @@
 import { ROLE } from "../constants";
 
 /**
- * 消息行的展示配置：按角色给出头像文字与角色标签。
+ * 一条消息 = 元信息行（角色标签 + 时间）+ 内容块。
  *
- * 气泡配色类名各端视角不同（如用户在用户端是蓝底、在坐席端是灰底），
- * 由调用方通过 bubbleClass 指定；头像/标签双端共用，保证角色识别一致。
+ * 这一版刻意去掉了头像和彩色气泡：
+ * - 头像用汉字圆角块（"智""客""用"）是 AI 聊天界面的默认长相，信息量为零
+ * - 四色气泡靠颜色区分角色，等于让颜色承担语义——色弱用户直接失去信息
+ *
+ * 现在角色由**文字标签**表达（客户 / 智能客服 / 人工），颜色只做加速识别；
+ * 内容块统一白底描边，左侧 2px 色条按角色变色。
  */
-const ROLE_DISPLAY = {
-  [ROLE.USER]: { avatar: "cust", avatarText: "用", tag: "客户" },
-  [ROLE.AGENT]: { avatar: "bot2", avatarText: "智", tag: "智能客服" },
-  [ROLE.HUMAN]: { avatar: "human", avatarText: "客", tag: "人工" },
+
+// 角色标签文案：同一角色在两端视角下叫法不同（用户看自己是"你"，坐席看是"客户"）
+const ROLE_LABEL = {
+  [ROLE.USER]: "客户",
+  [ROLE.AGENT]: "智能客服",
+  [ROLE.HUMAN]: "人工坐席",
 };
 
-export function roleDisplay(role) {
-  return ROLE_DISPLAY[role] ?? ROLE_DISPLAY[ROLE.AGENT];
-}
-
-/**
- * 坐席端视角的气泡类名映射：
- * 客户浅灰蓝 / 智能客服白底蓝描边 / 人工坐席绿色（与用户端一致）。
- */
-const AGENT_VIEW_BUBBLE = {
-  [ROLE.USER]: "cust",
-  [ROLE.AGENT]: "agent-view",
-  [ROLE.HUMAN]: "human",
+// 标签的语义修饰类：只影响左侧色条与标签颜色，不影响内容可读性
+const ROLE_CLASS = {
+  [ROLE.USER]: "line--user",
+  [ROLE.AGENT]: "line--agent",
+  [ROLE.HUMAN]: "line--human",
 };
 
-export function agentViewBubbleClass(role) {
-  return AGENT_VIEW_BUBBLE[role] ?? AGENT_VIEW_BUBBLE[ROLE.AGENT];
-}
-
-/**
- * 渲染一条消息（头像 + 气泡），不含行容器与对齐方向——那由各端视角决定。
- *
- * @param message  {role, content}
- * @param bubbleClass 该端视角下此消息的气泡类名（如 "user" / "cust" / "agent-view"）
- * @param withAvatar  是否渲染头像（用户看自己的消息通常不需要）
- * @param showTag     是否显示角色标签（自己的消息一般不需要标明身份）
- */
-// 时间展示：今天的消息只显示时分，更早的带日期
+// 时间展示：今天的只显示时分，更早的带日期。
+// 等宽数字 + 补零，保证一列时间在视觉上对齐
 function formatTime(ts) {
   if (!ts) return "";
   const d = new Date(ts);
@@ -48,35 +36,35 @@ function formatTime(ts) {
   return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
-export function MessageBubble({ message, bubbleClass, withAvatar = true, showTag = true, showTime }) {
-  if (!message.content) return null; // 空消息不渲染（如坐席接入后的无应答轮次）
-  const d = roleDisplay(message.role);
-  // 人工消息且带坐席昵称：标签显示具体是谁回复的（坐席端视角保持"人工"）
-  const isHumanNamed = message.role === ROLE.HUMAN && message.sender_name;
+/**
+ * @param message  {role, content, ts, sender_name}
+ * @param side     "end"（自己，右对齐）| "start"（对方，左对齐）
+ * @param label    角色标签文案覆盖（如用户端把自己的消息标成"你"）
+ * @param old      是否旧会话消息（坐席端历史流里非当前 thread 的记录）
+ */
+export function MessageBubble({ message, side = "start", label, old = false }) {
+  if (!message.content) return null;   // 空消息不渲染（坐席接入后的无应答轮次）
+
+  // 人工消息带坐席昵称时，标签显示"具体是谁"而不是笼统的"人工坐席"
+  const roleLabel =
+    label ??
+    (message.role === ROLE.HUMAN && message.sender_name
+      ? message.sender_name
+      : ROLE_LABEL[message.role] ?? ROLE_LABEL[ROLE.AGENT]);
   const time = formatTime(message.ts);
-  // 时间默认跟随角色标签展示；隐藏标签的消息（如用户自己的气泡）
-  // 需单独开 showTime 才能显示发送时间
-  const wantTime = showTime ?? showTag;
+
   return (
-    <>
-      {withAvatar && (
-        <span className={`avatar bot ${d.avatar}`} aria-hidden="true">
-          {d.avatarText}
-        </span>
-      )}
-      <div className={`msg ${bubbleClass}`}>
-        {/* 无标签但要显示时间的消息：时间在气泡内、消息上方独立一行 */}
-        {!showTag && wantTime && time && (
-          <time className="msg-time-solo">{time}</time>
-        )}
-        {showTag && (
-          <span className="role-tag">
-            {isHumanNamed ? message.sender_name : d.tag}
-            {wantTime && time && <time className="msg-time">{time}</time>}
-          </span>
-        )}
-        {message.content}
+    <div
+      className={`line line--${side} ${ROLE_CLASS[message.role] ?? ""} ${old ? "line--old" : ""}`}
+    >
+      <div className="line-meta">
+        <span className={`role role--${message.role}`}>{roleLabel}</span>
+        {time && <time className="mono" dateTime={message.ts}>{time}</time>}
+        {old && <span className="mono">历史</span>}
       </div>
-    </>
+      <div className="bubble">{message.content}</div>
+    </div>
   );
 }
+
+export default MessageBubble;

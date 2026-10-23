@@ -9,9 +9,9 @@ import AgentConsole from "./components/AgentConsole";
  * - `/`      → 用户端
  * - `/agent` → 坐席端
  *
- * 两个页面各自维护 URL，浏览器刷新/收藏/前进后退都停在原页面；
- * 坐席工作台与用户聊天彻底隔离，坐席不再需要看用户端入口。
- * Vite dev server 默认带 SPA history fallback，深链直达 /agent 也能打开。
+ * 视觉上外壳只做一件事：一条 48px 深色顶栏。旧版是"渐变背景 + 悬浮圆角卡片"，
+ * 内容被包在浮层里；新版把 chrome 压成一条铭牌式的深色条，工作区满幅铺开——
+ * 读起来是工具，不是落地页。
  */
 
 // 路径 → 页面标识（多一层间接，未来加页面只改这张表）
@@ -22,6 +22,17 @@ const ROUTES = {
 
 function viewFromPath() {
   return ROUTES[window.location.pathname] ?? "user";
+}
+
+// 品牌标识：几何线条（一个方框 + 内部斜切），比汉字圆角块更中性，
+// 也不依赖任何字体渲染
+function BrandMark() {
+  return (
+    <svg className="brand-mark" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="17" height="17" rx="2" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M6 13.5V9.5M10 13.5V6.5M14 13.5v-2.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="square" />
+    </svg>
+  );
 }
 
 function App() {
@@ -42,27 +53,35 @@ function App() {
   }
 
   return (
-    <div className="shell">
-      {/* 页面切换导航：真实 URL 而非 tab 内部状态，语义是"两个页面" */}
-      <nav className="view-tabs">
-        <div className="view-tabs-inner">
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <BrandMark />
+          <span className="brand-name">舒心购</span>
+          <span className="brand-tag">support console</span>
+        </div>
+        {/* 视图切换用 aria-current 表达"当前页"，
+            无障碍上比 class 高亮更准确（读屏会念"当前页面"） */}
+        <nav className="switch" aria-label="视图切换">
           <button
-            className={view === "user" ? "tab active" : "tab"}
+            className="switch-btn"
+            aria-current={view === "user" ? "page" : undefined}
             onClick={() => navigate("/")}
           >
             用户端
           </button>
           <button
-            className={view === "agent" ? "tab active" : "tab"}
+            className="switch-btn"
+            aria-current={view === "agent" ? "page" : undefined}
             onClick={() => navigate("/agent")}
           >
             坐席端
           </button>
-        </div>
-      </nav>
-      <div className="view-body">
+        </nav>
+      </header>
+      <main className="workspace">
         {view === "user" ? <UserChat /> : <AgentConsole />}
-      </div>
+      </main>
     </div>
   );
 }

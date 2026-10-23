@@ -9,6 +9,18 @@ import { API_BASE, AUTH_ROLE, errorMessage, setAuth } from "../constants";
  *   坐席账号由管理员用 scripts/create_agent.py 创建，不开放自助注册
  */
 
+// 标识：几何线条方框，中性且不依赖字体渲染。
+// 刻意不用"舒/席"汉字圆角块——那种做法既是 AI 生成界面最典型的图标，
+// 也会在中文字体缺失时变成一个方框
+function Mark() {
+  return (
+    <svg className="login-mark" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="17" height="17" rx="2" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M6 13.5V9.5M10 13.5V6.5M14 13.5v-2.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="square" />
+    </svg>
+  );
+}
+
 export default function LoginView({ role, onLogin }) {
   const isAgent = role === AUTH_ROLE.AGENT;
   const [mode, setMode] = useState("login");        // login | register（仅用户端有 register）
@@ -48,18 +60,17 @@ export default function LoginView({ role, onLogin }) {
   }
 
   return (
-    <div className="login-wrap">
+    <div className="login">
       <form className="login-card" onSubmit={submit}>
-        <div className="login-logo" aria-hidden="true">
-          {isAgent ? "席" : "舒"}
-        </div>
-        <h1>{isAgent ? "坐席工作台登录" : "登录舒心购"}</h1>
+        <Mark />
+        <h1 className="login-title">{isAgent ? "坐席工作台" : "登录舒心购"}</h1>
         <p className="login-sub">
-          {isAgent ? "请使用管理员分配的坐席账号" : "登录后您的会话将与账号绑定"}
+          {isAgent ? "使用管理员分配的坐席账号" : "登录后会话与账号绑定，换设备也能接上"}
         </p>
 
-        <label>
-          用户名
+        {/* 字段标签用等宽小写字母，读起来像表单编号而不是营销文案 */}
+        <label className="field">
+          <span>用户名</span>
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -68,8 +79,8 @@ export default function LoginView({ role, onLogin }) {
             required
           />
         </label>
-        <label>
-          密码
+        <label className="field">
+          <span>密码</span>
           <input
             type="password"
             value={password}
@@ -80,8 +91,8 @@ export default function LoginView({ role, onLogin }) {
           />
         </label>
         {mode === "register" && (
-          <label>
-            昵称（可选）
+          <label className="field">
+            <span>昵称（可选）</span>
             <input
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
@@ -90,7 +101,8 @@ export default function LoginView({ role, onLogin }) {
           </label>
         )}
 
-        {error && <div className="login-error">{error}</div>}
+        {/* role="alert"：提交失败时读屏立即播报，不需要用户自己找错误在哪 */}
+        {error && <div className="form-error" role="alert">{error}</div>}
 
         <button className="login-btn" type="submit" disabled={busy}>
           {busy ? "请稍候…" : mode === "login" ? "登录" : "注册并登录"}

@@ -3,7 +3,7 @@ import {
   API_BASE, AUTH_ROLE, getAuth, clearAuth, authFetch, errorMessage,
 } from "../constants";
 import { createSocket } from "../ws";
-import { MessageBubble, agentViewBubbleClass } from "./MessageBubble";
+import { MessageBubble } from "./MessageBubble";
 import LoginView from "./LoginView";
 
 /**
@@ -20,9 +20,8 @@ import LoginView from "./LoginView";
  * - POST /agent/threads/{thread_id}/close    → 结束（→ closed）
  * - POST /agent/threads/{thread_id}/reply    → 回复（落库后服务端推给用户端）
  *
- * 为什么队列用"信号 + 重拉"而不是直接推列表：队列是按坐席过滤的
- * （in_service 只对接入者可见），推列表要给每条连接算一份；
- * 推信号让客户端用同一个 REST 接口取自己那份，过滤口径只有一处。
+ * 布局：左侧队列栏（比详情区深一档底色）+ 右侧会话区。
+ * 不用"两张白卡片并排"——那样两个区域权重相同，坐席分不清主次。
  */
 
 const STATUS_LABEL = {
@@ -30,9 +29,17 @@ const STATUS_LABEL = {
   in_service: "处理中",
   active: "自助中",
   closed: "已结束",
-  // 本地态：会话已从队列消失但不是被自己接入/关闭的（被其他坐席接走）。
-  // 只用于详情面板展示，不出现在队列列表里
-  locked: "其他坐席处理中",
+  // 本地态：会话已从队列消失但不是被自己接入/关闭的（被其他坐席接走）
+  locked: "他人在办",
+};
+
+// 状态徽章的修饰类：类名不能直接用状态值（带下划线/特殊字符时易踩坑，
+// 也让"状态值"和"样式名"耦合），显式映射一份更安全
+const STATUS_CLASS = {
+  queued: "badge--queued",
+  in_service: "badge--in_service",
+  closed: "badge--closed",
+  locked: "badge--locked",
 };
 
 function timeAgo(iso) {
@@ -60,31 +67,28 @@ function AgentConsoleInner({ auth, onLogout }) {
   const [threads, setThreads] = useState([]);
   const [error, setError] = useState("");
   // 当前查看的会话：{thread_id, status}。存状态对象而非裸 ID，
-  // 因为操作按钮按状态显隐（queued→接入 / in_service→结束），
-  // 队列刷新时同步更新选中会话的状态，避免按钮与实际状态脱节
+  // 因为操作按钮按状态显隐（queued→接入 / in_service→结束）
   const [selected, setSelected] = useState(null);
   const [history, setHistory] = useState([]);       // 当前会话的消息
-  // 用户完整历史流：跨 thread 合并（含当前会话与以前会话）。
-  // null = 匿名会话/未加载，回退展示当前 thread 的 history
+  // 用户完整历史流：跨 thread 合并。null = 匿名会话/未加载，回退 thread history
   const [userHistory, setUserHistory] = useState(null);
-  const [reply, setReply] = useState("");           // 坐席回复用户的输入
-  const [note, setNote] = useState("");             // 结束处理时的结果备注
-  const [acting, setActing] = useState(false);      // accept/close/reply 请求进行中
-  const [connected, setConnected] = useState(false); // WS 是否已连上
+  const [reply, setReply] = useState("");
+  const [note, setNote] = useState("");
+  const [acting, setActing] = useState(false);
+  const [connected, setConnected] = useState(false);
   const listRef = useRef(null);
   const socketRef = useRef(null);
+
   // 事件回调里要读"当前选中的会话"，但回调在建立连接时就被闭包捕获了。
-  // 用 ref 存一份最新的，回调里读 ref 才不会拿到过期值。
-  // 赋值放 effect 而不是渲染期：渲染期写 ref 在并发渲染下可能被丢弃的
-  // 那次渲染写脏（React 官方不推荐，oxlint 也会告警）
+  // 用 ref 存一份最新的；赋值放 effect 而不是渲染期（渲染期写 ref 在
+  // 并发渲染下可能被丢弃的那次渲染写脏）
   const selectedRef = useRef(null);
   useEffect(() => {
     selectedRef.current = selected;
   }, [selected]);
 
   // 队列快照 → state，并同步选中会话的状态（多坐席并发场景）：
-  // - 会话已从队列消失：若不是自己刚关闭的，说明被其他坐席接走/关闭，
-  //   标记为 locked 展示"其他坐席处理中"（没有操作按钮与回复栏）
+  // - 会话已从队列消失：若不是自己刚关闭的，说明被其他坐席接走
   // - 会话还在队列里：以队列返回的最新状态为准（按钮显隐跟着变）
   const applyQueue = useCallback((list) => {
     setThreads(list);
@@ -109,7 +113,7 @@ function AgentConsoleInner({ auth, onLogout }) {
       const data = await resp.json();
       applyQueue(data.threads ?? []);
     } catch {
-      // 拉取失败不打断页面，只展示提示（WS 的 queue_changed 会再触发一次）
+      // 拉取失败不打断页面（WS 的 queue_changed 会再触发一次）
       setError("队列刷新失败，正在重试…");
     }
   }, [applyQueue, onLogout]);
@@ -178,7 +182,6 @@ function AgentConsoleInner({ auth, onLogout }) {
       );
       if (!resp.ok) return;
       const data = await resp.json();
-      // 有归属且有消息才切换到历史流视图；否则维持 thread history 回退
       if (data.messages?.length) setUserHistory(data.messages);
     } catch {
       // 加载失败静默：详情面板继续展示当前 thread 历史，不阻断
@@ -187,10 +190,13 @@ function AgentConsoleInner({ auth, onLogout }) {
 
   async function openThread(thread) {
     const threadId = thread.thread_id;
-    // 整包存队列项：user_display_name 供详情标题展示，status 供操作按钮显隐
-    setSelected({ thread_id: threadId, status: thread.status, user_display_name: thread.user_display_name });
+    setSelected({
+      thread_id: threadId,
+      status: thread.status,
+      user_display_name: thread.user_display_name,
+    });
     setHistory([]);
-    setUserHistory(null);   // 用户主动切换会话时才清空，避免显示上一单内容
+    setUserHistory(null);   // 主动切换会话时才清空，避免显示上一单内容
     try {
       const resp = await authFetch(
         `${API_BASE}/chat/${threadId}/history`, {}, AUTH_ROLE.AGENT, onLogout,
@@ -199,7 +205,6 @@ function AgentConsoleInner({ auth, onLogout }) {
       const data = await resp.json();
       setHistory(data.messages ?? []);
       setSelected((sel) => (sel ? { ...sel, status: data.status } : null));
-      // 异步加载完整历史流：成功后详情面板切到跨会话视图
       loadUserHistory(threadId);
     } catch {
       setError("会话历史加载失败");
@@ -210,7 +215,7 @@ function AgentConsoleInner({ auth, onLogout }) {
     if (!selected || acting) return;
     setActing(true);
     try {
-      // 坐席身份取自登录态：后端以 Token 中的账号为准，请求体不再传 agent_name
+      // 坐席身份取自登录态：后端以 Token 中的账号为准
       const resp = await authFetch(`${API_BASE}/agent/threads/${selected.thread_id}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -261,9 +266,9 @@ function AgentConsoleInner({ auth, onLogout }) {
         thread_id: selected.thread_id,
       };
       setReply("");
-      // 乐观更新当前消息流：不清空/重载整个会话，避免发送后列表闪空再重绘
+      // 乐观更新：不清空/重载整个会话，避免发送后列表闪空再重绘
       setHistory((prev) => [...prev, humanMessage]);
-      setUserHistory((prev) => prev === null ? null : [...prev, humanMessage]);
+      setUserHistory((prev) => (prev === null ? null : [...prev, humanMessage]));
     } catch {
       alert("回复发送失败，请检查网络");
     } finally {
@@ -271,18 +276,66 @@ function AgentConsoleInner({ auth, onLogout }) {
     }
   }
 
+  const visible = userHistory ?? history;
+
   return (
-    <div className="agent-layout">
+    <div className="console">
+      {/* 页面级标题只给读屏用：视觉上顶栏已经说明了"坐席端"，
+          但没有 h1 会让屏幕阅读器失去页面结构的起点 */}
+      <h1 className="sr-only">坐席工作台</h1>
       {/* 左侧：待处理队列 */}
-      <aside className="queue-panel">
-        <div className="queue-head">
+      <aside className="rail">
+        <div className="rail-head">
           <h2>待处理队列</h2>
-          <span className="queue-count">{threads.length}</span>
+          {/* 计数用 aria-hidden 藏掉裸数字，另给一句完整语义：
+              读屏念"待处理会话 3 个"而不是孤零零的"3" */}
+          <span className="count">
+            <span aria-hidden="true">{String(threads.length).padStart(2, "0")}</span>
+            <span className="sr-only">待处理会话 {threads.length} 个</span>
+          </span>
         </div>
-        <div className="queue-agent">
-          <span className="login-user">{auth.display_name || auth.username}</span>
+
+        {!connected && <div className="rail-note rail-note--warn">实时连接已断开，正在重连…</div>}
+        {error && <div className="rail-note rail-note--error">{error}</div>}
+
+        <div className="queue">
+          {threads.length === 0 && !error && (
+            <div className="thread-empty" style={{ marginTop: 40 }}>
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6h18M3 12h18M3 18h11" />
+              </svg>
+              暂无待处理会话
+            </div>
+          )}
+
+          {threads.map((t) => (
+            <button
+              key={t.thread_id}
+              className="queue-item"
+              // 选中态用 aria-current 表达，不只靠颜色
+              aria-current={selected?.thread_id === t.thread_id ? "true" : undefined}
+              onClick={() => openThread(t)}
+            >
+              <div className="queue-top">
+                {/* 优先显示用户昵称（后端 JOIN 得出）；匿名会话回退"游客 + ID 前 8 位" */}
+                <span className="queue-name">
+                  {t.user_display_name || `游客 ${t.thread_id.slice(0, 8)}`}
+                </span>
+                <span className={`badge ${STATUS_CLASS[t.status] ?? "badge--closed"}`}>
+                  <span className="dot" />
+                  {STATUS_LABEL[t.status] ?? t.status}
+                </span>
+              </div>
+              <div className="queue-reason">{t.reason || "（无转接原因）"}</div>
+              <div className="queue-time">{timeAgo(t.updated_at)}</div>
+            </button>
+          ))}
+        </div>
+
+        <div className="rail-foot">
+          <span className="who">{auth.display_name || auth.username}</span>
           <button
-            className="ghost-btn"
+            className="btn"
             onClick={() => {
               clearAuth(AUTH_ROLE.AGENT);
               onLogout();
@@ -291,125 +344,103 @@ function AgentConsoleInner({ auth, onLogout }) {
             退出
           </button>
         </div>
-        {!connected && <div className="queue-error">实时连接已断开，正在重连…</div>}
-        {error && <div className="queue-error">{error}</div>}
-        <div className="queue-list">
-          {threads.length === 0 && !error && (
-            <div className="queue-empty">
-              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M22 12h-6l-2 3h-4l-2-3H2" />
-                <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-              </svg>
-              暂无待处理会话
-            </div>
-          )}
-          {threads.map((t) => (
-            <button
-              key={t.thread_id}
-              className={`queue-item ${selected?.thread_id === t.thread_id ? "selected" : ""} ${t.status}`}
-              onClick={() => openThread(t)}
-            >
-              <div className="queue-item-top">
-                {/* 优先显示用户昵称（后端 JOIN 得出）；匿名会话回退"游客 + ID 前 8 位" */}
-                <span className="thread-id">
-                  {t.user_display_name || `游客 ${t.thread_id.slice(0, 8)}`}
-                </span>
-                <span className={`badge ${t.status}`}>{STATUS_LABEL[t.status] ?? t.status}</span>
-              </div>
-              <div className="queue-reason">{t.reason || "（无转接原因）"}</div>
-              <div className="queue-time">{timeAgo(t.updated_at)}</div>
-            </button>
-          ))}
-        </div>
       </aside>
 
       {/* 右侧：会话详情 */}
-      <section className="detail-panel">
+      <section className="thread">
         {!selected ? (
-          <div className="detail-empty">
-            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="14" rx="2" />
-              <path d="M3 8h18" />
+          <div className="thread-empty">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="15" rx="2" />
+              <path d="M3 9h18" />
             </svg>
-            从队列中选择一个会话查看详情
+            从左侧队列选择一个会话
           </div>
         ) : (
           <>
-            <div className="detail-head">
-              <h2>
+            <header className="thread-head">
+              <h2 className="thread-name">
                 {selected.user_display_name || `游客 ${selected.thread_id.slice(0, 8)}`}
-                <span className={`badge ${selected.status}`}>{STATUS_LABEL[selected.status] ?? selected.status}</span>
               </h2>
-              {/* 操作按钮按会话状态显隐：
-                  queued → 接入（接入后才能回复，后端有状态校验）；
-                  in_service → 结束处理；closed → 无操作 */}
-              <div className="detail-actions">
+              <span className={`badge ${STATUS_CLASS[selected.status] ?? "badge--closed"}`}>
+                <span className="dot" />
+                {STATUS_LABEL[selected.status] ?? selected.status}
+              </span>
+              {/* 完整 ID 给排查用：坐席反馈问题时需要能定位到具体会话 */}
+              <span className="thread-id">{selected.thread_id.slice(0, 8)}</span>
+              <div className="thread-actions">
+                {/* 操作按钮按会话状态显隐：
+                    queued → 接入（接入后才能回复，后端有状态校验）；
+                    in_service → 结束处理；closed → 无操作 */}
                 {selected.status === "queued" && (
-                  <button className="primary-btn" disabled={acting} onClick={() => act("accept")}>
+                  <button className="btn-primary" disabled={acting} onClick={() => act("accept")}>
                     接入
                   </button>
                 )}
                 {selected.status === "in_service" && (
-                  <button className="danger-btn" disabled={acting} onClick={() => act("close")}>
+                  <button className="btn-danger" disabled={acting} onClick={() => act("close")}>
                     结束处理
                   </button>
                 )}
               </div>
-            </div>
-            {/* 消息列表：优先展示用户完整历史流（旧会话置灰），
+            </header>
+
+            {/* 消息列表：优先展示用户完整历史流（旧会话降透明度），
                 匿名会话/未加载回退当前 thread 历史 */}
-            <div className="msg-list" ref={listRef}>
-              {(userHistory ?? history).length === 0 && <div className="queue-empty">加载中…</div>}
-              {(userHistory ?? history).map((m, i) => {
-                // 完整历史流里非当前 thread 的消息 = 以前会话的记录：置灰区分，
-                // 坐席能一眼看出哪些是本轮对话、哪些是用户以前问过的
-                const isOldThread = userHistory !== null && m.thread_id && m.thread_id !== selected.thread_id;
-                return (
-                  <div
-                    key={`${m.thread_id ?? selected.thread_id}|${m.ts ?? ""}|${m.role}|${m.content}|${i}`}
-                    className={`msg-row ${m.role === "user" ? "assistant" : "user"} ${isOldThread ? "old-thread" : ""}`}
+            <div className="log" ref={listRef} role="log" aria-live="polite" aria-label="会话消息">
+              {visible.length === 0 && (
+                <div className="thread-empty" style={{ marginTop: 40 }}>加载中…</div>
+              )}
+              {visible.map((m, i) => (
+                <MessageBubble
+                  key={`${m.thread_id ?? selected.thread_id}|${m.ts ?? ""}|${m.role}|${i}`}
+                  message={m}
+                  // 坐席视角：客户消息靠左，客服/坐席消息靠右（与自己同侧）
+                  side={m.role === "user" ? "start" : "end"}
+                  // 历史流里非当前 thread 的消息置灰，坐席能一眼看出哪条属于本轮
+                  old={userHistory !== null && m.thread_id && m.thread_id !== selected.thread_id}
+                />
+              ))}
+            </div>
+
+            {/* 回复区：仅接入后（in_service）显示；排队中可看记录但须先接入 */}
+            {selected.status === "in_service" && (
+              <div className="reply">
+                <form
+                  className="reply-row"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    sendReply();
+                  }}
+                >
+                  <input
+                    value={reply}
+                    onChange={(e) => setReply(e.target.value)}
+                    placeholder="回复客户，回车发送"
+                    disabled={acting}
+                    aria-label="回复客户"
+                  />
+                  <button
+                    className="send"
+                    type="submit"
+                    disabled={acting || !reply.trim()}
+                    aria-label="发送回复"
                   >
-                    <MessageBubble
-                      message={m}
-                      bubbleClass={agentViewBubbleClass(m.role)}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-            {/* 回复栏：仅接入后（in_service）显示；排队中可看记录但须先接入再回复 */}
-            {selected.status === "in_service" && (
-            <div className="reply-bar">
-              <input
-                value={reply}
-                onChange={(e) => setReply(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && sendReply()}
-                placeholder="回复客户…（回车发送）"
-                disabled={acting}
-                aria-label="回复客户"
-              />
-              <button
-                className="send-btn"
-                onClick={sendReply}
-                disabled={acting || !reply.trim()}
-                aria-label="发送回复"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <line x1="22" y1="2" x2="11" y2="13" />
-                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                </svg>
-              </button>
-            </div>
-            )}
-            {/* 处理结果备注：仅结束处理时需要，in_service 才显示 */}
-            {selected.status === "in_service" && (
-            <div className="resolve-bar">
-              <input
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="处理结果备注（结束后记录，可选）"
-              />
-            </div>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M4 12h15M13 6l6 6-6 6" />
+                    </svg>
+                  </button>
+                </form>
+                {/* 处理结果备注：次级动作，视觉上明显弱于回复框 */}
+                <div className="note-row">
+                  <input
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="处理结果备注（结束处理时记录，可选）"
+                    aria-label="处理结果备注"
+                  />
+                </div>
+              </div>
             )}
           </>
         )}
