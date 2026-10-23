@@ -81,21 +81,26 @@ def _columns(dsn: str, table: str) -> set[str]:
     return {r[0] for r in rows}
 
 
+# 期望的"全部版本"从 MIGRATIONS 推导，而不是硬编码 ——
+# 否则每加一条迁移就要改测试，且容易漏改（本步真的踩到）
+ALL_VERSIONS = [m.version for m in migrations.MIGRATIONS]
+LATEST = max(ALL_VERSIONS)
+
 def test_fresh_database_creates_all_tables(temp_db):
     """空库跑迁移：所有业务表一次建齐。"""
     applied = migrations.run()
-    assert applied == [1], "空库应只应用基线 v1"
+    assert applied == ALL_VERSIONS, "空库应一次应用全部迁移"
     assert BUSINESS_TABLES <= _tables(temp_db)
 
 
 def test_run_is_idempotent(temp_db):
     """重复执行不重复应用、不报错。"""
-    assert migrations.run() == [1]
+    assert migrations.run() == ALL_VERSIONS
     assert migrations.run() == [], "第二次不应再应用任何迁移"
 
     with psycopg.connect(temp_db, autocommit=True) as conn:
         n = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
-    assert n == 1
+    assert n == len(ALL_VERSIONS)
 
 
 def test_adopts_existing_old_schema_without_data_loss(temp_db):
@@ -136,7 +141,7 @@ def test_adopts_existing_old_schema_without_data_loss(temp_db):
             ("old-thread", "queued"),
         )
 
-    assert migrations.run() == [1]
+    assert migrations.run() == ALL_VERSIONS
 
     # 缺的列被补上
     assert {"agent_id", "user_id", "resolution"} <= _columns(temp_db, "conversation_status")
@@ -153,12 +158,12 @@ def test_adopts_existing_old_schema_without_data_loss(temp_db):
 def test_status_reports_pending_then_applied(temp_db):
     """status() 能准确报出待应用/已应用，供部署流程判断。"""
     before = migrations.status()
-    assert before == {"current": 0, "latest": 1, "applied": [], "pending": [1]}
+    assert before == {"current": 0, "latest": LATEST, "applied": [], "pending": ALL_VERSIONS}
 
     migrations.run()
 
     after = migrations.status()
-    assert after == {"current": 1, "latest": 1, "applied": [1], "pending": []}
+    assert after == {"current": LATEST, "latest": LATEST, "applied": ALL_VERSIONS, "pending": []}
 
 
 def test_migration_versions_are_unique_and_ascending():
@@ -182,8 +187,9 @@ def test_failed_migration_rolls_back_and_raises(temp_db, monkeypatch):
     - 该版本的 DDL 回滚（不留半截结构）
     - 不写 schema_migrations 记录（下次还会重试）
     """
+    # 版本号取 LATEST+1：用固定值会和真实迁移撞号（本步新增 v2 时撞过）
     broken = migrations.Migration(
-        version=2, name="broken", sql="CREATE TABLE half_made (id INT); SELECT 1/0;"
+        version=LATEST + 1, name="broken", sql="CREATE TABLE half_made (id INT); SELECT 1/0;"
     )
     # 先存下原始列表：后面要再 patch 一次，不能用已 patch 过的 MIGRATIONS
     # 去拼（那样会把 broken 再追加一遍，导致第二次仍然失败）
@@ -198,14 +204,14 @@ def test_failed_migration_rolls_back_and_raises(temp_db, monkeypatch):
 
     with psycopg.connect(temp_db, autocommit=True) as conn:
         applied = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-    assert [r[0] for r in applied] == [1], "失败的那条不能记成已应用"
+    assert [r[0] for r in applied] == ALL_VERSIONS, "失败的那条不能记成已应用"
 
     # 修好之后应该能继续应用（说明失败没把库搞坏）
     monkeypatch.setattr(
         migrations, "MIGRATIONS",
-        (*original, migrations.Migration(2, "fixed", "CREATE TABLE ok_table (id INT);")),
+        (*original, migrations.Migration(LATEST + 1, "fixed", "CREATE TABLE ok_table (id INT);")),
     )
-    assert migrations.run() == [2]
+    assert migrations.run() == [LATEST + 1]
     assert "ok_table" in _tables(temp_db)
 
 
@@ -227,7 +233,7 @@ async def test_startup_warns_loudly_when_schema_behind(temp_db, monkeypatch, cap
     migrations.run()
     monkeypatch.setattr(
         migrations, "MIGRATIONS",
-        (*migrations.MIGRATIONS, migrations.Migration(999, "future", "SELECT 1;")),
+        (*migrations.MIGRATIONS, migrations.Migration(LATEST + 100, "future", "SELECT 1;")),
     )
 
     fake = get_settings().model_copy(update={"auto_migrate": False})

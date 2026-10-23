@@ -120,6 +120,30 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
 CREATE INDEX IF NOT EXISTS idx_kb_chunk_parent ON kb_chunk (parent_id);
 """
 
+# ---- v2：知识库重建任务记录 ----
+
+_KB_REBUILD_SQL = """
+-- 知识库重建任务记录。
+-- 为什么存 DB 而不存进程内存：重建要 20+ 秒，是后台任务；多 worker 下
+-- 发起请求和查询状态可能落到不同进程，状态必须共享。
+CREATE TABLE IF NOT EXISTS kb_rebuild_run (
+    id           BIGSERIAL PRIMARY KEY,
+    status       TEXT NOT NULL,              -- running / succeeded / failed
+    triggered_by TEXT,                       -- 触发人（坐席昵称，审计用）
+    started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at  TIMESTAMPTZ,
+    chunks       INTEGER,                    -- 成功时的块数
+    error        TEXT                        -- 失败原因（用户可读）
+);
+-- 部分唯一索引：保证同一时刻只能有一个 running。
+-- 用它而不是应用层判断，是因为"检查→插入"之间有多 worker 竞争窗口；
+-- 索引把互斥交给数据库，并发插入会直接报唯一冲突
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_rebuild_running
+    ON kb_rebuild_run ((status)) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_kb_rebuild_started
+    ON kb_rebuild_run (started_at DESC);
+"""
+
 @dataclass(frozen=True)
 class Migration:
     """一次迁移。
@@ -136,6 +160,7 @@ class Migration:
 # 改 schema 的流程：在末尾加一条 Migration(N+1, "...", "ALTER TABLE ...")
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline", _BASELINE_SQL),
+    Migration(2, "kb_rebuild_run", _KB_REBUILD_SQL),
 )
 
 def _ensure_version_table(conn: psycopg.Connection) -> None:

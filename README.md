@@ -16,6 +16,7 @@
 | 输入防护 | 提示注入检测 + 违禁词拦截，命中即友好拒答并留痕 |
 | 限流保护 | 按账号/ IP 滑动窗口限流 + LLM 并发闸门（超限快速失败而非无限排队） |
 | 可观测 | Langfuse trace（LLM / 工具 / LangGraph 节点 span），未配置时零侵入 no-op |
+| 知识库管理 | `/kb` 页面：状态读数、按文件切分策略、异步重建、检索验证（坐席登录） |
 | 评估 | 黄金问答集 + 检索/生成两层跑分（`scripts/run_eval.py`） |
 
 ## 快速开始
@@ -76,13 +77,16 @@ uv run python scripts/create_agent.py agent1 agent123 坐席小王
 
 ### 6. 导入知识库
 
-语料在 `data/knowledge_base/`。首次启动后调一次重建（蓝绿重建，无需重启）：
+语料在 `data/knowledge_base/`。用坐席账号登录后打开 `http://localhost:5173/kb`，
+点「重建索引」即可（蓝绿重建，旧索引全程在线）。
+
+也可以用命令行触发（需坐席 Token）：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/debug/kb/rebuild
+curl -X POST http://127.0.0.1:8000/kb/rebuild -H "Authorization: Bearer <坐席Token>"
 ```
 
-改了语料或切分策略后重调一次即可。该接口仅在 `DEBUG=true` 时注册，生产环境不会暴露。
+改了语料或切分策略后重建一次生效；管理页会提示哪些文件"语料比索引新"。
 
 ## 常用命令
 
@@ -106,11 +110,11 @@ uv run python scripts/run_eval.py --full # 评估：完整链路（检索 + 生�
 app/
   main.py            # FastAPI 入口：只做组装（路由、生命周期）
   core/              # 配置、LLM、鉴权、输入防护、WS 连接中心、事件总线、限流、迁移
-  api/               # 路由：/chat /auth /agent /ws，以及业务编排 process_message
+  api/               # 路由：/chat /auth /agent /ws /kb，以及业务编排 process_message
   agents/            # LangGraph 图、工具、转接状态机、上下文摘要
   rag/               # 切块、embedding、Milvus 与 Postgres 存储
   eval/              # 黄金集、指标、跑分器
-web/src/             # Vite + React：用户端 / 坐席端 / WS 客户端
+web/src/             # Vite + React：用户端 / 坐席端 / 知识库管理 / WS 客户端
 data/knowledge_base/ # Markdown 知识库语料
 tests/               # pytest（API / WS / 检索 / 摘要 / 评估）
 compose.yaml         # 中间件编排（含 observability profile）

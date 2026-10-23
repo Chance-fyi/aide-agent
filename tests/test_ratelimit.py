@@ -172,20 +172,6 @@ def test_guard_disabled_when_zero():
 # ============================================================
 
 @pytest.fixture
-async def client():
-    """REST 客户端：ASGITransport 直连 app，**不起 lifespan**。
-
-    为什么不起 lifespan：lifespan 会跑数据库迁移，测试不该改开发库的 schema
-    （本步已经踩过一次：假迁移被应用到真实库）。
-    """
-    from httpx import ASGITransport, AsyncClient
-
-    from app.main import app
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield c
-
-@pytest.fixture
 def tight_limit(monkeypatch):
     """把限流收紧到 1 条/分钟，并重置单例让配置生效。"""
     from app.api import chat as chat_mod

@@ -156,3 +156,55 @@ def stats() -> dict:
         parents = conn.execute("SELECT count(*) FROM kb_parent").fetchone()[0]
         chunks = conn.execute("SELECT count(*) FROM kb_chunk").fetchone()[0]
     return {"documents": docs, "parents": parents, "chunks": chunks}
+
+def file_stats() -> list[dict]:
+    """按文件统计块数（知识库管理界面用）。
+
+    一次 JOIN 聚合出每个文件的父块/子块数量，避免前端逐文件请求。
+    LEFT JOIN 保证「已入库但没有块」的文件也出现（重建失败时会这样）。
+    """
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.path, d.strategy, d.updated_at,
+                   count(DISTINCT p.id) AS parents,
+                   count(c.id) AS chunks
+            FROM kb_document d
+            LEFT JOIN kb_parent p ON p.doc_path = d.path
+            LEFT JOIN kb_chunk  c ON c.parent_id = p.id
+            GROUP BY d.path, d.strategy, d.updated_at
+            ORDER BY d.path
+            """
+        ).fetchall()
+    return [
+        {
+            "path": r[0],
+            "strategy": r[1],
+            "indexed_at": r[2].isoformat(),
+            "parents": r[3],
+            "chunks": r[4],
+        }
+        for r in rows
+    ]
+
+def recent_chunks(path: str, limit: int = 3) -> list[dict]:
+    """取某文件的若干切块预览（管理界面「看看切得对不对」用）。
+
+    按 id 升序取前几条：文件内顺序即原文顺序，看开头就能判断切分是否合理。
+    """
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT c.id, c.content, p.h1, p.h2
+            FROM kb_chunk c
+            JOIN kb_parent p ON p.id = c.parent_id
+            WHERE p.doc_path = %s
+            ORDER BY c.id ASC
+            LIMIT %s
+            """,
+            (path, limit),
+        ).fetchall()
+    return [
+        {"id": r[0], "content": r[1], "h1": r[2], "h2": r[3]}
+        for r in rows
+    ]

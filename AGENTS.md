@@ -12,7 +12,7 @@
   → 消息落 `chat_message` 表 → 经 WebSocket 推给双端
 - **已完成**：MVP → 异常处理 → 测试 → 评估集 → 上下文窗口/摘要 → Langfuse →
   坐席工作台 → WebSocket 实时推送 → 前端视觉重做
-- **未开始**：多 Agent 重构、SSE 流式输出、知识库管理 UI（见各步文档的遗留问题）
+- **未开始**：多 Agent 重构、SSE 流式输出（见各步文档的遗留问题）
 
 ## 硬性约束（每次修改代码都必须遵守）
 
@@ -65,6 +65,7 @@ app/
     chat.py          # 业务编排 process_message（REST 与 WS 共用）
     ws.py            # /ws/chat、/ws/agent 端点
     routes.py        # 坐席操作 /agent/*
+    kb_admin.py      # 知识库管理 /kb/*（正式路由，坐席登录，生产可用）
     auth.py deps.py schemas.py debug_routes.py
   agents/
     graph.py         # LangGraph 图（单 Agent + tool calling）
@@ -72,6 +73,7 @@ app/
     summarize.py     # 上下文摘要
     runtime.py       # 图与 Checkpointer 生命周期
   rag/               # 切块、embedding、Milvus 与 Postgres 存储
+    rebuild.py       # 知识库后台重建任务（DB 状态 + 唯一索引互斥）
   eval/              # 黄金集、指标、跑分器
 web/src/
   components/        # UserChat / AgentConsole / LoginView / MessageBubble
@@ -141,5 +143,12 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
 - **不要 monkeypatch 全局 `time.monotonic`**。asyncio 的事件循环时钟就是它，
   冻结后所有 `asyncio.wait_for` 永不超时（踩过一次：并发闸门测试挂死）。
   需要控制时间就注入时钟（见 `SlidingWindowLimiter(clock=...)`）。
+- **管理接口不要挂在 `/debug` 下**。`/debug/*` 只在 `DEBUG=true` 注册，
+  生产关掉后就没有入口了（知识库曾因此变成"上线即冻结"）。
+  正式管理能力放 `/kb/*` 这类正式路由，用坐席鉴权。
+- **长任务必须异步 + 状态入 DB**。知识库重建要 24 秒，同步接口会撞代理超时；
+  状态存进程内存时多 worker 会读到"空闲"并允许并发。见 `rag/rebuild.py`。
+- **状态查询要在一次快照里取完**。分两次查库会返回自相矛盾的结果
+  （`job.status=running` + `running=false`），前端据此停轮询却仍显示进行中。
 - **历史数据源是 `chat_message` 表，不是 Checkpointer**。Checkpointer 只在
   记录表为空时兜底（存量会话）。有测试锁住这一点。

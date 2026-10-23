@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import UserChat from "./components/UserChat";
 import AgentConsole from "./components/AgentConsole";
+import KbConsole from "./components/KbConsole";
 
 /**
  * 应用外壳：用户端 / 坐席端分成两个独立页面。
  *
- * 路由用原生 History API（无 react-router 依赖，项目只需两个路径）：
+ * 路由用原生 History API（无 react-router 依赖，项目只需三个路径）：
  * - `/`      → 用户端
  * - `/agent` → 坐席端
+ * - `/kb`    → 知识库管理（坐席登录，生产可用）
  *
  * 视觉上外壳只做一件事：一条 48px 深色顶栏。旧版是"渐变背景 + 悬浮圆角卡片"，
  * 内容被包在浮层里；新版把 chrome 压成一条铭牌式的深色条，工作区满幅铺开——
@@ -18,6 +20,7 @@ import AgentConsole from "./components/AgentConsole";
 const ROUTES = {
   "/": "user",
   "/agent": "agent",
+  "/kb": "kb",
 };
 
 function viewFromPath() {
@@ -36,7 +39,7 @@ function BrandMark() {
 }
 
 function App() {
-  // view: 'user' 用户端 | 'agent' 坐席端
+  // view: 'user' 用户端 | 'agent' 坐席端 | 'kb' 知识库管理
   const [view, setView] = useState(viewFromPath);
 
   // 浏览器前进/后退时同步页面（pushState 不会触发 popstate，点击切换里手动 setState）
@@ -77,10 +80,19 @@ function App() {
           >
             坐席端
           </button>
+          <button
+            className="switch-btn"
+            aria-current={view === "kb" ? "page" : undefined}
+            onClick={() => navigate("/kb")}
+          >
+            知识库
+          </button>
         </nav>
       </header>
       <main className="workspace">
-        {view === "user" ? <UserChat /> : <AgentConsole />}
+        {view === "user" && <UserChat />}
+        {view === "agent" && <AgentConsole />}
+        {view === "kb" && <KbConsole />}
       </main>
     </div>
   );

@@ -15,6 +15,7 @@ from app.agents import runtime
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
+from app.api.kb_admin import router as kb_router
 from app.api.routes import agent_router, router
 from app.api.ws import router as ws_router
 from app.core import migrations
@@ -140,6 +141,8 @@ app.include_router(router)
 app.include_router(auth_router)
 app.include_router(agent_router)
 app.include_router(chat_router)
+# 知识库管理：正式路由（生产可用，要求坐席登录），与 /debug/kb 分工不同
+app.include_router(kb_router)
 # WebSocket：双端实时推送（/ws/chat 用户端、/ws/agent 坐席端）
 app.include_router(ws_router)
 register_debug_routes(app)  # 调试路由：debug=False 时不注册

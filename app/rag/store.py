@@ -302,3 +302,39 @@ def search(
     # 低分过滤放在父块回查前：被过滤的命中不值得再查一次 Postgres
     out = [h for h in out if h["score"] >= threshold]
     return _attach_parents(out)
+
+def collection_info() -> dict:
+    """线上集合状态（知识库管理界面用）。
+
+    返回别名指向的真实集合、块数、以及残留的旧版本集合——
+    旧版本残留通常是蓝绿重建清理失败，会白占内存/磁盘，值得在界面上暴露。
+    """
+    s = get_settings()
+    client = _get_client()
+    alias = alias_name()
+    current = _resolve_collection(client, alias)
+    try:
+        all_collections = list(client.list_collections())
+    except Exception:
+        logger.warning("列出 Milvus 集合失败", exc_info=True)
+        all_collections = []
+
+    chunks = None
+    if current:
+        try:
+            stats = client.get_collection_stats(current)
+            chunks = int(stats.get("row_count", 0))
+        except Exception:
+            logger.warning("查询集合统计失败 collection=%s", current, exc_info=True)
+
+    return {
+        "alias": alias,
+        "current_collection": current,
+        "chunks": chunks,
+        # 当前集合以外的都是历史版本残留（或别的 schema 版本的集合）
+        "stale_collections": [c for c in all_collections if c != current],
+        "schema_version": s.kb_schema_version,
+        "embedding_model": s.embedding_model,
+        "embedding_dim": s.embedding_dim,
+        "min_score": s.retrieval_min_score,
+    }

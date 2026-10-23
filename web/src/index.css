@@ -950,3 +950,308 @@ input { font: inherit; color: inherit; }
   .reply-row { padding: 10px 14px; }
   .note-row { padding: 0 14px 10px; }
 }
+
+/* ==========================================================================
+   知识库管理（/kb）
+
+   沿用同一套设计系统：墨色阶、发丝线、等宽数字、零装饰阴影。
+   表格是这个页面的主体——管理界面的价值在于"一眼看出哪里不对"，
+   所以状态列（已索引/待重建）和读数（块数）都要能快速扫视。
+   ========================================================================== */
+
+.kb {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  overflow-y: auto;
+  padding: 18px 20px 24px;
+  gap: 14px;
+}
+
+.kb-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.kb-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.kb-sub {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--ink-500);
+}
+.kb-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* 顶部提示条：复用坐席端的 rail-note 语义（左色条 + 浅底） */
+.kb-note { margin: 0; }
+
+/* 读数条：像仪表盘的刻度区，用发丝线分格 */
+.kb-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--ink-100);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.metric {
+  flex: 1 1 0;
+  min-width: 110px;
+  padding: 10px 14px;
+  border-right: 1px solid var(--ink-100);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.metric:last-child { border-right: none; }
+/* 集合名很长，给它更多空间且允许省略 */
+.metric--wide { flex: 2 1 200px; min-width: 0; }
+.metric-label {
+  font-size: 11px;
+  color: var(--ink-500);
+}
+.metric-value {
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.15;
+  color: var(--ink-900);
+}
+.metric-value--sm {
+  font-size: 12px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-top: 5px;
+}
+
+/* 重建操作区 */
+.kb-rebuild {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.kb-job {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--ink-500);
+  flex-wrap: wrap;
+}
+.kb-hint {
+  font-size: 11.5px;
+  color: var(--ink-500);
+  line-height: 1.6;
+}
+.kb-error {
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+/* 双栏：左表格（主）+ 右预览（辅）。左宽右窄体现主次 */
+.kb-body {
+  display: flex;
+  gap: 16px;
+  min-height: 0;
+  flex: 1;
+}
+.kb-docs {
+  flex: 1.6 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ink-100);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.kb-side {
+  flex: 1 1 0;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.kb-panel {
+  border: 1px solid var(--ink-100);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.kb-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--ink-100);
+  background: var(--surface-2);
+}
+.kb-panel-head h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-600);
+  letter-spacing: 0.02em;
+}
+.kb-panel-head .count { margin-left: auto; color: var(--ink-500); }
+.kb-panel-sub {
+  margin-left: auto;
+  color: var(--ink-500);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 55%;
+}
+.kb-panel-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* 表格：行高紧凑、数字右对齐，方便纵向扫视 */
+.kb-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.kb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.kb-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--ink-500);
+  background: var(--surface-2);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ink-100);
+  white-space: nowrap;
+}
+.kb-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--ink-50);
+  vertical-align: middle;
+}
+.kb-table tbody tr { cursor: pointer; }
+.kb-table tbody tr:hover { background: var(--ink-50); }
+/* 选中态用左色条 + 底色，不只靠颜色（配合 aria 语义时更稳） */
+.kb-table tbody tr.selected {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.kb-table .num { text-align: right; }
+.kb-path {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-900);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-table select {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-600);
+  border: 1px solid var(--ink-100);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  /* 高度给足：原生 select 的默认高度只有 20 出头，鼠标都难点准；
+     用 min-height 而不是 padding，保证不同浏览器下高度一致 */
+  min-height: 30px;
+  padding: 2px 6px;
+  max-width: 130px;
+}
+.kb-table select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.kb-empty {
+  text-align: center;
+  color: var(--ink-500);
+  padding: 28px 12px;
+}
+
+/* 切块/检索结果：等宽正文，因为要看的是原文边界与长度 */
+.kb-chunk {
+  border-left: 2px solid var(--ink-200);
+  padding-left: 9px;
+}
+.kb-chunk-meta {
+  font-size: 10px;
+  color: var(--ink-500);
+  margin-bottom: 3px;
+}
+.kb-chunk-body {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-600);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 120px;
+  overflow: hidden;
+}
+/* 分数：低于阈值标红（颜色 + 数字本身双重表达） */
+.score-ok { color: var(--green); font-weight: 500; }
+.score-low { color: var(--danger); font-weight: 500; }
+
+.kb-search {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+.kb-search input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--ink-100);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font-size: 12.5px;
+  background: var(--surface-2);
+  outline: none;
+  transition: border-color var(--t), background var(--t);
+}
+.kb-search input:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+/* 失败态徽章：与排队/处理中并列的第三档 */
+.badge--failed { color: var(--danger); background: var(--danger-soft); }
+
+/* 窄屏：双栏改纵向堆叠，表格允许横向滚动（列不多，挤一挤仍可读） */
+@media (max-width: 900px) {
+  .kb { padding: 14px; }
+  /* 触屏环境所有控件 ≥44px（与坐席端一致） */
+  .kb-table select,
+  .kb-search input,
+  .kb-search .btn,
+  .kb-rebuild .btn-primary { min-height: 44px; }
+  .kb-body { flex-direction: column; }
+  .kb-docs { flex: 0 0 auto; max-height: 46vh; }
+  .kb-side { min-width: 0; }
+  .metric { min-width: 90px; padding: 8px 10px; }
+  .metric-value { font-size: 17px; }
+}
