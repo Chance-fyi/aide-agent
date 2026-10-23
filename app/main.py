@@ -17,6 +17,7 @@ from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
 from app.api.routes import agent_router, router
 from app.api.ws import router as ws_router
+from app.core import migrations
 from app.core.config import get_settings
 
 # 日志基础配置：生产部署时由 gunicorn/uvicorn 参数或环境变量接管更细粒度的配置，
@@ -49,6 +50,43 @@ async def _queue_sweeper():
         await asyncio.sleep(get_settings().queue_sweep_interval_sec)
 
 
+async def prepare_schema(s) -> None:
+    """启动阶段准备数据库 schema（迁移或版本校验）。
+
+    为什么单独成一个函数而不是写在 lifespan 里：这样能直接单测"schema 落后
+    必须打 CRITICAL"这条承诺，不用为了测一行日志去起整个 TestClient
+    （起 TestClient 会连真实库，测试一不小心就会改到开发数据）。
+
+    失败策略：**只告警不阻断启动**。Postgres 可能比后端起得晚（开发期常见），
+    这里硬失败会让"先起后端再起中间件"这个习惯直接不可用；
+    get_graph() 里还有一次迁移，首次真正用到图时会重试并抛出。
+    """
+    if s.auto_migrate:
+        try:
+            applied = await asyncio.to_thread(migrations.run)
+            if applied:
+                logger.info("数据库迁移已应用: %s", applied)
+        except Exception:
+            logger.exception(
+                "启动时迁移失败（不阻断启动，首次对话时会重试）。"
+                "生产环境请先执行 uv run python -m app.core.migrations"
+            )
+        return
+
+    # 关掉自动迁移时只校验版本：落后就大声警告。
+    # 为什么必须 CRITICAL：带着旧 schema 跑业务，报错会出现在离根因很远的
+    # 业务代码里（"查询缺列"），运维很难联想到是迁移没跑
+    try:
+        st = await asyncio.to_thread(migrations.status)
+        if st["pending"]:
+            logger.critical(
+                "schema 落后：当前 v%d，待应用 %s（AUTO_MIGRATE=false，"
+                "请先执行 uv run python -m app.core.migrations）",
+                st["current"], st["pending"],
+            )
+    except Exception:
+        logger.exception("迁移状态检查失败")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期钩子。
@@ -60,6 +98,9 @@ async def lifespan(app: FastAPI):
     s = get_settings()
     logger.info("LLM: model=%s base_url=%s", s.llm_model, s.llm_base_url)
     logger.info("Milvus: %s | Postgres: %s:%s", s.milvus_uri, s.postgres_host, s.postgres_port)
+
+    await prepare_schema(s)
+
     # 可观测性初始化（未配置 Key 时完全 no-op，不影响启动）
     from app.core import tracing
 

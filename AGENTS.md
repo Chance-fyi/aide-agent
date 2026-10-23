@@ -26,6 +26,9 @@
    并给出友好降级，不裸抛。对外只说"什么问题 + 该怎么办"，细节进日志。
 7. **业务逻辑只写一处**：REST 与 WebSocket 两条入口共用 `app/api/chat.py` 的
    `process_message`，不要为某条通道另写一套编排。
+8. **改 schema 只走迁移**：`app/core/migrations.py` 里**追加**一条 `Migration`，
+   不要写 `CREATE TABLE` / `ALTER TABLE` 到业务模块，更不允许 `DROP TABLE`
+   （`chat_message` 存的是用户真实聊天记录，删一次就是数据事故）。
 
 ## 领域约定（改动时不要破坏）
 
@@ -53,6 +56,7 @@ app/
   main.py            # FastAPI 入口：只做组装（注册路由、生命周期）
   core/
     config.py        # 全部配置（pydantic-settings，读 .env）
+    migrations.py    # 数据库迁移：版本表 + 有序迁移列表（DDL 的唯一来源）
     hub.py           # WebSocket 连接中心：寻址推送、每连接 outbox
     llm.py guardrails.py security.py users.py tracing.py
   api/
@@ -94,6 +98,7 @@ cd web && fnm use && npm run dev         # 启动前端（5173）
 运维/数据命令：
 
 ```bash
+uv run python -m app.core.migrations [--status]                      # 数据库迁移 / 看版本
 uv run python scripts/create_agent.py <username> <password> [昵称]   # 建坐席账号
 curl -X POST http://127.0.0.1:8000/debug/kb/rebuild                  # 重建知识库索引
 uv run python scripts/run_eval.py [--full]                           # 跑评估集
@@ -114,5 +119,11 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
 - **前端视觉有硬约束**：零装饰阴影、零背景渐变、无 emoji 图标、颜色只做信号不做装饰、
   小号文字对比度 ≥4.5:1。改样式前先看 `index.css` 顶部说明。
   （`box-shadow` 只允许用于键盘焦点环 `0 0 0 3px var(--ring)`，不要拿去画卡片投影。）
+- **改 schema 必须走迁移，不要 `DROP TABLE`**。旧实现"schema 不一致就整表重建"
+  会把用户聊天记录全删。现在 `schema_migrations` 记版本，基线是幂等的
+  （`CREATE IF NOT EXISTS` + `ADD COLUMN IF NOT EXISTS`），老库能被接管而不丢数据。
+- **测试不要连真实库**。迁移类测试用临时库（见 `tests/test_migrations.py` 的
+  `temp_db` fixture），并注意 `from ... import get_settings` 绑定的是名字，
+  要 patch **使用方模块**才生效——踩过一次，假迁移被应用到开发库上。
 - **历史数据源是 `chat_message` 表，不是 Checkpointer**。Checkpointer 只在
   记录表为空时兜底（存量会话）。有测试锁住这一点。

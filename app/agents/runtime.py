@@ -16,8 +16,8 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph.state import CompiledStateGraph
 from psycopg_pool import AsyncConnectionPool
 
-from app.agents import handoff
 from app.agents.graph import build_graph_with_memory
+from app.core import migrations
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -44,12 +44,23 @@ async def get_graph() -> CompiledStateGraph:
                 )
                 await _pool.open(wait=True, timeout=10)  # 显式打开并等到至少一个连接就绪
                 _checkpointer = AsyncPostgresSaver(_pool)
-                await _checkpointer.setup()   # 幂等建 Checkpointer 表
-                handoff.ensure_table()        # 幂等建转接状态表
-                from app.core.users import ensure_table as ensure_user_table
-                ensure_user_table()           # 幂等建用户账号表（登录体系）
-                from app.rag import kb_store
-                kb_store.ensure_table()       # 幂等建知识库文档/切块表（父块存储）
+                await _checkpointer.setup()   # 幂等建 Checkpointer 表（框架自带迁移）
+
+                # 业务表统一迁移（替代原先三处 ensure_table 各自建表 + DROP 重建）。
+                # 同步 psycopg 会阻塞事件循环，放 to_thread 执行；
+                # 迁移内部有 advisory lock，多 worker 并发启动也不会撞车
+                if get_settings().auto_migrate:
+                    await asyncio.to_thread(migrations.run)
+                else:
+                    # 关掉自动迁移时，只校验版本是否落后，落后就大声警告：
+                    # 带着旧 schema 启动的报错点会离真正原因很远，必须在启动时暴露
+                    st = await asyncio.to_thread(migrations.status)
+                    if st["pending"]:
+                        logger.critical(
+                            "schema 落后：当前 v%d，待应用 %s（AUTO_MIGRATE=false，"
+                            "请先执行 uv run python -m app.core.migrations）",
+                            st["current"], st["pending"],
+                        )
                 _graph = build_graph_with_memory(_checkpointer)
                 logger.info("Agent 图已初始化（AsyncPostgresSaver）")
     return _graph

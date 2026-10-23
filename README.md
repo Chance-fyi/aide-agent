@@ -48,6 +48,14 @@ uv run fastapi dev
 默认监听 `http://127.0.0.1:8000`，自动热重载，接口文档在 `/docs`。
 需要局域网内其他设备访问时加 `--host 0.0.0.0`。
 
+启动时会自动应用数据库迁移（`AUTO_MIGRATE=true`）。生产环境建议关掉自动迁移，
+改为发布流程里先执行一次：
+
+```bash
+uv run python -m app.core.migrations            # 应用待执行的迁移
+uv run python -m app.core.migrations --status   # 只查看当前版本
+```
+
 ### 4. 启动前端
 
 ```bash
@@ -83,6 +91,8 @@ uv run pytest tests/test_ws.py -q        # 只跑某个模块
 uv run ruff check .                      # lint
 cd web && npm run lint && npm run build  # 前端 lint / 构建
 
+uv run python -m app.core.migrations      # 应用数据库迁移
+uv run python -m app.core.migrations --status  # 查看迁移版本
 uv run python scripts/create_agent.py    # 创建坐席账号
 uv run python scripts/run_eval.py        # 评估：只跑检索层（不花 LLM 费用）
 uv run python scripts/run_eval.py --full # 评估：完整链路（检索 + 生成 + 转人工判断）

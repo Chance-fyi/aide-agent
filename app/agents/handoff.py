@@ -41,56 +41,14 @@ def _get_conn() -> psycopg.Connection:
 
 
 def ensure_table() -> None:
-    """幂等建表。
+    """兼容入口：执行数据库迁移（建表逻辑已迁到 app/core/migrations.py）。
 
-    schema 变更时直接 DROP 旧表重建（开发期无历史负担，不做存量迁移）；
-    上生产前再引入正式的迁移机制。
+    保留这个函数名是因为测试与运维脚本仍在调用它；实现改为幂等迁移。
+    **不要再往这里加 DDL** —— 改 schema 请到 migrations.py 追加一条 Migration。
     """
-    with _get_conn() as conn:
-        # 开发期：schema 与代码不一致时整表重建，容忍丢数据
-        # （检测方式：尝试访问关键列，缺列/缺表则重建；agent_id 为 step-29 新增的接入锁定列）
-        try:
-            conn.execute("SELECT user_id, agent_id FROM conversation_status LIMIT 1")
-        except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
-            conn.execute("DROP TABLE IF EXISTS conversation_status")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_status (
-                thread_id  TEXT PRIMARY KEY,          -- 会话 ID（与 Checkpointer thread_id 同源）
-                status     TEXT NOT NULL DEFAULT 'active',
-                reason     TEXT,                       -- 转接原因（阈值/关键词/用户诉求）
-                agent_name TEXT,                       -- 接入坐席昵称（展示用）
-                agent_id   BIGINT,                     -- 接入坐席账号 ID（回复/关闭权限校验的唯一依据）
-                resolution TEXT,                       -- 坐席处理结果
-                user_id    BIGINT,                     -- 会话归属用户（关联 app_user.id；匿名会话为空）
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_user ON conversation_status (user_id)")
-        # 用户可见的会话记录表：用户/机器人/人工坐席的消息都落在这里。
-        # 为什么不用 Checkpointer 当历史源：Checkpointer 是 Agent 执行快照，
-        # 坐席回复、纯转达类消息不经过图执行，写不进去；
-        # 且跨天恢复、坐席端展示都需要按时间序读纯消息流，独立表查询模型更简单
-        try:
-            conn.execute("SELECT user_id FROM chat_message LIMIT 1")
-        except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
-            conn.execute("DROP TABLE IF EXISTS chat_message")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_message (
-                id         BIGSERIAL PRIMARY KEY,
-                thread_id  TEXT NOT NULL,
-                role       TEXT NOT NULL,              -- user / agent(智能客服) / human(人工坐席)
-                content    TEXT NOT NULL,
-                user_id    TEXT,                       -- user 角色消息的发送者（agent/human 消息为空）
-                sender_id  BIGINT,                     -- human 消息的坐席（关联 app_user.id；昵称 JOIN 得到）
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-        """)
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chat_message_thread ON chat_message (thread_id, id)"
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_message_user ON chat_message (user_id)")
+    from app.core import migrations
 
+    migrations.run()
 
 def append_message(
     thread_id: str, role: str, content: str,

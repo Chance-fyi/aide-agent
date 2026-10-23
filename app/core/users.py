@@ -20,19 +20,14 @@ def _get_conn() -> psycopg.Connection:
 
 
 def ensure_table() -> None:
-    """幂等建表：用户账户独立于会话数据，账号生命周期与会话无关。"""
-    with _get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS app_user (
-                id            BIGSERIAL PRIMARY KEY,  -- 代理主键：其他表用它关联（改用户名不悬空）
-                username      TEXT NOT NULL UNIQUE,   -- 登录名（唯一，但可变更）
-                password_hash TEXT NOT NULL,          -- PBKDF2 哈希，绝不存明文
-                role          TEXT NOT NULL,          -- user(用户端) / agent(坐席端)
-                display_name  TEXT NOT NULL,          -- 展示昵称（坐席接入时显示给用户）
-                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-        """)
+    """兼容入口：执行数据库迁移（建表逻辑已迁到 app/core/migrations.py）。
 
+    保留函数名是因为 scripts/create_agent.py 与测试仍在调用；
+    **不要再往这里加 DDL**，改 schema 请到 migrations.py 追加 Migration。
+    """
+    from app.core import migrations
+
+    migrations.run()
 
 def get_user_by_id(user_id: int) -> dict | None:
     """按主键查询账号信息（Token 校验后用；账号已删除返回 None 按未认证处理）。"""

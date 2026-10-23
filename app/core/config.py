@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # 环境标签：同一套 Key 下区分 dev/staging/prod，便于在 UI 里筛选
     langfuse_environment: str = "development"
 
+    # ----- 数据库迁移 -----
+    # 启动时是否自动应用待执行的 schema 迁移。
+    # 开发/单实例：true 最省事；多副本部署建议 false，
+    # 改为发布流程里先跑 `python -m app.core.migrations` 再起新代码，
+    # 避免“新代码带着旧 schema 跑起来”的窗口期
+    auto_migrate: bool = True
+
     # ----- 登录认证 -----
     # Token 签名密钥：生产环境必须通过 .env 覆盖为随机长字符串
     auth_secret: str = "dev-secret-change-me"

@@ -34,47 +34,15 @@ def _get_conn() -> psycopg.Connection:
     return psycopg.connect(s.postgres_dsn, autocommit=True)
 
 def ensure_table() -> None:
-    """幂等建表：文档 / 父块 / 子块三张表，逐级外键 CASCADE。
+    """兼容入口：执行数据库迁移（建表逻辑已迁到 app/core/migrations.py）。
 
-    开发期约定：schema 与代码不一致时整表重建（无存量迁移负担）。
+    知识库表结构也在统一迁移里管理——它虽然是可重建的派生数据，
+    但让所有 DDL 只有一处来源，才不会出现"某张表没人管"的情况。
+    **不要再往这里加 DDL**。
     """
-    with _get_conn() as conn:
-        try:
-            conn.execute("SELECT id, path, strategy FROM kb_document LIMIT 1")
-            conn.execute("SELECT id, parent_id FROM kb_chunk LIMIT 1")
-        except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable):
-            # 顺序与依赖相反：先删子表再删父表
-            conn.execute("DROP TABLE IF EXISTS kb_chunk")
-            conn.execute("DROP TABLE IF EXISTS kb_parent")
-            conn.execute("DROP TABLE IF EXISTS kb_document")
+    from app.core import migrations
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS kb_document (
-                id         BIGSERIAL PRIMARY KEY,   -- 代理主键：项目统一口径
-                path       TEXT NOT NULL UNIQUE,    -- 文件路径（相对语料目录，如 returns.md）
-                strategy   TEXT,                    -- 切分策略覆盖；NULL = 按后缀默认
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-        """)
-        # 父块 = 一个小节：同小节的子块共享这一行（父块正文只存一份）
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS kb_parent (
-                id       BIGSERIAL PRIMARY KEY,
-                doc_path TEXT NOT NULL REFERENCES kb_document(path) ON DELETE CASCADE,
-                content  TEXT NOT NULL,             -- 小节全文（父子检索的返回单元）
-                h1       TEXT NOT NULL DEFAULT '',
-                h2       TEXT NOT NULL DEFAULT ''
-            )
-        """)
-        # 子块 = 检索单元：只存自身正文 + 指向父块的外键，不重复存父块正文
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS kb_chunk (
-                id        BIGSERIAL PRIMARY KEY,
-                parent_id BIGINT NOT NULL REFERENCES kb_parent(id) ON DELETE CASCADE,
-                content   TEXT NOT NULL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_chunk_parent ON kb_chunk (parent_id)")
+    migrations.run()
 
 # ---- 切分策略管理 ----
 
