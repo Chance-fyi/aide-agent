@@ -41,9 +41,13 @@ function formatTime(ts) {
  * @param side     "end"（自己，右对齐）| "start"（对方，左对齐）
  * @param label    角色标签文案覆盖（如用户端把自己的消息标成"你"）
  * @param old      是否旧会话消息（坐席端历史流里非当前 thread 的记录）
+ * @param streaming 是否正在流式输出（末尾追加光标；内容为空时也要渲染占位）
  */
-export function MessageBubble({ message, side = "start", label, old = false }) {
-  if (!message.content) return null;   // 空消息不渲染（坐席接入后的无应答轮次）
+export function MessageBubble({ message, side = "start", label, old = false, streaming = false }) {
+  // 空内容不渲染（坐席接入后的无应答轮次）。
+  // 例外：流式中的占位气泡内容为空也要渲染——否则用户看到的是"光标没了、
+  // 气泡也没出现"的空窗期，直到第一个 delta 到达才有反应
+  if (!message.content && !streaming) return null;
 
   // 人工消息带坐席昵称时，标签显示"具体是谁"而不是笼统的"人工坐席"
   const roleLabel =
@@ -62,7 +66,11 @@ export function MessageBubble({ message, side = "start", label, old = false }) {
         {time && <time className="mono" dateTime={message.ts}>{time}</time>}
         {old && <span className="mono">历史</span>}
       </div>
-      <div className="bubble">{message.content}</div>
+      <div className="bubble">
+        {message.content}
+        {/* 流式光标：纯装饰，读屏由外层 aria-live 播报整段内容 */}
+        {streaming && <span className="caret" aria-hidden="true" />}
+      </div>
     </div>
   );
 }

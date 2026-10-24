@@ -38,3 +38,22 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 def embed_query(text: str) -> list[float]:
     """单条查询向量化。"""
     return get_embeddings().embed_query(text)
+
+def warmup() -> None:
+    """预热 embedding 模型与 Milvus 连接（应用启动时调用）。
+
+    为什么需要：首次 `embed_query` 要加载 torch 权重（实测约 19 秒），
+    首次 Milvus 检索要建 gRPC 连接。若不预热，这些成本会全部落到
+    **第一个真实用户**头上——表现为"发第一条消息要等 20 秒"，
+    而后续消息 0.02 秒。用户不会知道这是冷启动，只会觉得"这系统很卡"。
+
+    失败只记日志不抛：预热是优化，不能成为启动前提
+    （Milvus 未就绪时服务仍应能起来，等真正检索时再报错）。
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        embed_query("warmup")
+    except Exception:
+        logger.warning("embedding 预热失败（首个请求会承担加载开销）", exc_info=True)

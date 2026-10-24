@@ -103,6 +103,16 @@ async def lifespan(app: FastAPI):
 
     await prepare_schema(s)
 
+    # 预热 embedding 模型：首次加载 torch 权重实测约 19 秒，
+    # 不预热就会让第一个用户等 20 秒（后续请求只要 0.02 秒）。
+    # 放后台任务，不阻塞启动——否则启动时间也会多 20 秒
+    async def _warmup():
+        from app.rag import embedder
+
+        await asyncio.to_thread(embedder.warmup)
+
+    asyncio.create_task(_warmup())
+
     # 跨进程事件总线：多 worker 部署时推送能跨进程送达。
     # 启动失败只降级（退回单进程），不让总线成为启动前提
     from app.core.bus import bus

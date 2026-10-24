@@ -14,6 +14,7 @@
 
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import openai
@@ -66,6 +67,10 @@ class ChatOutcome:
     reply: str          # 要展示给用户的文本；空串 = 无需气泡（坐席已接入）
     status: str         # 处理后的会话状态
     transferred: bool   # 是否处于已转接（排队中/服务中）
+    # 落库后的权威消息标识。流式回复收尾时前端要拿它给占位气泡"转正"，
+    # 之后重连/重载才能按 id 与历史对齐（否则同一条会出现两次）
+    reply_id: int | None = None
+    reply_ts: str | None = None
 
 def _friendly_llm_error(exc: Exception) -> tuple[int, str]:
     """把 LLM 链路的异常翻译成（HTTP 状态码, 用户可读文案）。
@@ -220,15 +225,25 @@ def _handle_live(
     ack = _QUEUED_ACK if status == handoff.STATUS_QUEUED else ""
     return ChatOutcome(thread_id, ack, status, True)
 
-async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None) -> str:
-    """执行 Agent 图并提取纯文本回复；LLM 链路异常翻译为友好 HTTP 错误。"""
-    # 接入 Langfuse：未配置时 build_config 原样返回，与接入前完全等价
-    config = tracing.build_config(
+# LLM 生成空回复时的兜底话术（前端至少能看到"失败了"，而不是空白气泡）
+_EMPTY_REPLY = "抱歉，刚才的回复没有生成成功，请您再试一次。"
+
+def _agent_config(thread_id: str, user_id: int | None):
+    """构造图执行配置（含 Langfuse trace 透传）。"""
+    return tracing.build_config(
         thread_id,
         user_id=user_id,
         trace_name="chat",
         base={"configurable": {"thread_id": thread_id}},
     )
+
+async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None) -> str:
+    """执行 Agent 图并一次性取回纯文本回复（REST 入口用）。
+
+    WS 入口走 `_stream_agent`；这里保留非流式实现是因为 REST 响应体
+    本来就要一次给完整文本，用流式反而多绕一圈。
+    """
+    config = _agent_config(thread_id, user_id)
     try:
         graph = await get_graph()
         result = await graph.ainvoke(
@@ -249,8 +264,56 @@ async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None
     text = reply.text if isinstance(reply, AIMessage) else str(reply.content)
     if not text.strip():
         logger.warning("chat 生成空回复 thread=%s", thread_id)
-        return "抱歉，刚才的回复没有生成成功，请您再试一次。"
+        return _EMPTY_REPLY
     return text
+
+async def _stream_agent(
+    thread_id: str,
+    message: str,
+    user_id: int | None,
+    on_delta: Callable[[str], None],
+) -> str:
+    """流式执行 Agent 图：每生成一段文本就回调 `on_delta`，返回完整文本。
+
+    为什么用 astream_events 而不是 astream：
+    `astream` 只给出**节点级**的输出（agent 节点跑完才拿到整段 AIMessage），
+    拿不到 token。`astream_events` 能捕获 `on_chat_model_stream`，
+    才是真正的逐 token 流。
+
+    **必须过滤空 content**：Agent 是 tool-calling 结构，一轮对话至少两次
+    模型调用（先决定调工具、再根据结果作答）。实测第一轮 100% 是
+    空 content + tool_calls，只有最后一轮才有正文。若不过滤，前端会收到
+    大量空 delta，且可能把工具调用的中间文本当成回答推给用户。
+
+    异常处理与 `_invoke_agent` 一致：翻译成友好 HTTPException。
+    """
+    config = _agent_config(thread_id, user_id)
+    parts: list[str] = []
+    try:
+        graph = await get_graph()
+        async for event in graph.astream_events(
+            {"messages": [HumanMessage(content=message)]}, config, version="v2"
+        ):
+            if event["event"] != "on_chat_model_stream":
+                continue
+            chunk = event["data"]["chunk"]
+            # 工具调用轮次的 chunk 没有正文（content 为空），跳过；
+            # 这是区分"中间轮次"和"最终回答"最简单可靠的口径
+            text = getattr(chunk, "content", "") or ""
+            if not text:
+                continue
+            parts.append(text)
+            on_delta(text)
+    except Exception as exc:
+        logger.exception("chat 流式执行失败 thread=%s", thread_id)
+        status_code, detail = _friendly_llm_error(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from None
+
+    full = "".join(parts)
+    if not full.strip():
+        logger.warning("chat 生成空回复 thread=%s", thread_id)
+        return _EMPTY_REPLY
+    return full
 
 # ============================================================
 # 业务编排入口（REST / WS 共用）
@@ -303,6 +366,7 @@ async def process_message(
     *,
     push_reply: bool = False,
     client_ip: str | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> ChatOutcome:
     """一轮对话的完整业务处理（落库 + 推送 + 生成回复）。
 
@@ -312,6 +376,10 @@ async def process_message(
 
     client_ip：匿名用户的限流键。登录用户用账号 ID，匿名必须用 IP——
     匿名会话的 thread_id 是客户端自己传的，换个 ID 就能绕过限流。
+
+    on_delta：流式回调。传了就走流式（每段文本回调一次），不传则一次性生成。
+    只有"正常自助问答"分支会流式——安检拦截、已转人工、LLM 异常这些
+    都是瞬时结果，没有可流的内容，走原来的整体推送。
     """
     # 限流放在最前面：它比后面的安检/落库/LLM 都便宜，
     # 且被拦下的请求不应该产生任何副作用（不写库、不打 LLM）
@@ -344,7 +412,10 @@ async def process_message(
     guard = ratelimit.get_guard()
     await guard.acquire()
     try:
-        text = await _invoke_agent(thread_id, message, user_id=uid)
+        if on_delta is not None:
+            text = await _stream_agent(thread_id, message, uid, on_delta)
+        else:
+            text = await _invoke_agent(thread_id, message, user_id=uid)
     finally:
         # finally 里释放：LLM 超时/抛异常也必须归还名额，
         # 否则几个失败请求就能把闸门永久占满
@@ -352,7 +423,9 @@ async def process_message(
 
     saved_agent = _append_safe(thread_id, ROLE_AGENT, text)
     _notify_agents_message(thread_id, ROLE_AGENT, text, saved_agent)
-    if push_reply:
+    # 流式分支下内容已经边生成边推给用户了，这里只落库 + 通知坐席。
+    # 再整条推一次会让用户看到两条相同内容（id 不同，去重拦不住）
+    if push_reply and on_delta is None:
         _push_user_message(uid, ROLE_AGENT, text, saved_agent)
 
     # 转接可能在 Agent 执行中发生（LLM 调了转接工具 / 关键词兜底）：
@@ -360,7 +433,11 @@ async def process_message(
     # 状态本身的推送由 handoff 状态机负责（见 handoff._notify_status），
     # 这里只取结果给响应体用
     status = _get_thread_status(thread_id)
-    return ChatOutcome(thread_id, text, status, handoff.is_live_status(status))
+    return ChatOutcome(
+        thread_id, text, status, handoff.is_live_status(status),
+        reply_id=saved_agent["id"] if saved_agent else None,
+        reply_ts=saved_agent["ts"] if saved_agent else None,
+    )
 
 # ============================================================
 # REST 路由（保留：脚本/调试/WS 不可用时兜底）

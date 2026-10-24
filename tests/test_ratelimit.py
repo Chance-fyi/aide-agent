@@ -225,11 +225,14 @@ def test_ws_reports_rate_limit_as_error_event(ws_client, tight_limit, monkeypatc
 
     from app.api import chat as chat_mod
 
-    # 打桩 LLM：本用例验证的是限流，不该花真实模型调用（也会让测试变慢）
-    async def _fake_invoke(thread_id, message, user_id=None):
+    # 打桩 LLM：本用例验证的是限流，不该花真实模型调用（也会让测试变慢）。
+    # 自助问答走的是流式（_stream_agent），必须打桩它——只打桩 _invoke_agent
+    # 会让用例真的去调模型（本步踩过：全量测试卡在这一条上超时）
+    async def _fake_stream(thread_id, message, user_id, on_delta):
+        on_delta("好的")
         return "好的"
 
-    monkeypatch.setattr(chat_mod, "_invoke_agent", _fake_invoke)
+    monkeypatch.setattr(chat_mod, "_stream_agent", _fake_stream)
 
     username = f"rl_ws_{_uuid.uuid4().hex[:8]}"
     reg = ws_client.post(

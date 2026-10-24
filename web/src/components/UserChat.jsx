@@ -46,6 +46,8 @@ function UserChatInner({ auth, onLogout }) {
   const listRef = useRef(null);
   const inputRef = useRef(null);
   const socketRef = useRef(null);
+  // 流式回复进行中：为 true 时渲染占位气泡，delta 追加到它上面
+  const [streaming, setStreaming] = useState(false);
 
   // 连接状态点的颜色语义：断线=灰、人工中=琥珀、自助在线=绿。
   // 用类而不是内联 style：颜色必须从 token 取，内联写死会绕过设计系统
@@ -100,6 +102,7 @@ function UserChatInner({ auth, onLogout }) {
             setMessages(ev.messages ?? []);
             setTransferred(isLiveStatus(ev.status));
             setRestored(true);
+            setStreaming(false);
             clearPending();
             break;
           case "message":
@@ -107,6 +110,40 @@ function UserChatInner({ auth, onLogout }) {
             // 对方回复到了 → 收起"输入中"。
             // 用户自己的消息不会推回来（本地已乐观插入）
             if (ev.message?.role !== ROLE.USER) clearPending();
+            break;
+          case "reply_start":
+            // 流式开始：先插入一条占位气泡（无 id，末尾显示光标），
+            // 后续 delta 往它上面追加。没有这个起始标记就无法区分
+            // "新回复"与"上一条的补充"
+            setStreaming(true);
+            setMessages((prev) => [...prev, { role: ROLE.AGENT, content: "", streaming: true }]);
+            break;
+          case "reply_delta":
+            // 追加到**最后一条**消息上。用函数式更新读最新 state，
+            // 避免闭包里拿到过期的 messages
+            setMessages((prev) => {
+              if (prev.length === 0) return prev;
+              const last = prev[prev.length - 1];
+              if (!last.streaming) return prev;   // 已在 reply_end 收尾，迟到的 delta 丢弃
+              const next = prev.slice();
+              next[next.length - 1] = { ...last, content: last.content + ev.delta };
+              return next;
+            });
+            break;
+          case "reply_end":
+            // 收尾：把占位气泡替换成服务端权威消息（含 id/ts）。
+            // 拿到 id 之后，重连或重载时同一 id 会被 mergeMessage 合并，
+            // 不会出现"刷新前一条、刷新后还是一条但内容变了"这类错乱
+            setStreaming(false);
+            clearPending();
+            setMessages((prev) => {
+              if (prev.length === 0) return prev;
+              const last = prev[prev.length - 1];
+              if (!last.streaming) return prev;
+              const next = prev.slice();
+              next[next.length - 1] = { ...ev.message, streaming: false };
+              return next;
+            });
             break;
           case "sent":
             // 服务端确认"消息已接收"。这是清 pending 的**主信号**：
@@ -161,6 +198,7 @@ function UserChatInner({ auth, onLogout }) {
     // 重连后由 ready 快照替换为服务端时间
     appendMessage({ role: ROLE.USER, content: text });
     setInput("");
+    setStreaming(false);
     startPending();
     inputRef.current?.focus({ preventScroll: true });
   }
@@ -249,11 +287,14 @@ function UserChatInner({ auth, onLogout }) {
               // 自己的消息靠右，标签写"你"——比"客户"更自然
               side={m.role === ROLE.USER ? "end" : "start"}
               label={m.role === ROLE.USER ? "你" : undefined}
+              // 流式中的气泡在末尾显示光标（纯装饰，读屏靠 aria-live 播报）
+              streaming={m.streaming}
             />
           ))}
 
-          {/* 等待回复：一个闪烁光标，比三个跳动的点安静 */}
-          {loading && !transferred && (
+          {/* 等待回复：一个闪烁光标，比三个跳动的点安静。
+              已进入流式后不再显示——此时真正的气泡已经在渲染了 */}
+          {loading && !transferred && !streaming && (
             <div className="line line--start line--agent" aria-hidden="true">
               <div className="line-meta">
                 <span className="role role--agent">智能客服</span>

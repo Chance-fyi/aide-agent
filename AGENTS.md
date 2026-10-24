@@ -12,7 +12,7 @@
   → 消息落 `chat_message` 表 → 经 WebSocket 推给双端
 - **已完成**：MVP → 异常处理 → 测试 → 评估集 → 上下文窗口/摘要 → Langfuse →
   坐席工作台 → WebSocket 实时推送 → 前端视觉重做
-- **未开始**：多 Agent 重构、SSE 流式输出（见各步文档的遗留问题）
+- **未开始**：多 Agent 重构、CI、容器化部署（见各步文档的遗留问题）
 
 ## 硬性约束（每次修改代码都必须遵守）
 
@@ -39,7 +39,7 @@
 | 消息角色 `chat_message.role` | `user` / `agent`(智能客服) / `human`(人工坐席) | `app/api/chat.py` 的 `ROLE_*` |
 | 会话状态 `conversation_status.status` | `active` / `queued` / `in_service` / `closed` | `app/agents/handoff.py` 的 `STATUS_*` |
 | 账号角色 `app_user.role` | `user` / `agent` | `app/core/security.py` 的 `ROLE_*` |
-| WS 事件类型 | `ready` `message` `sent` `status` `queue_changed` `error` `pong` | `app/api/ws.py` 顶部文档字符串 |
+| WS 事件类型 | `ready` `message` `sent` `status` `queue_changed` `error` `pong` `reply_start` `reply_delta` `reply_end` | `app/api/ws.py` 顶部文档字符串 |
 
 状态机（唯一事实源在 `handoff.py`，状态变更会通过 `_notify_status` 自动推送双端）：
 
@@ -150,5 +150,10 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
   状态存进程内存时多 worker 会读到"空闲"并允许并发。见 `rag/rebuild.py`。
 - **状态查询要在一次快照里取完**。分两次查库会返回自相矛盾的结果
   （`job.status=running` + `running=false`），前端据此停轮询却仍显示进行中。
+- **改执行路径要全局搜打桩点**。WS 自助问答从 `_invoke_agent` 改成
+  `_stream_agent` 后，旧测试仍打桩前者 → 打桩静默失效 → 测试真的去调
+  LLM 和 Milvus，表现为"卡死不返回"而不是失败。改路径前先 `grep` 测试里的 monkeypatch。
+- **流式回复不能再次整体推送**。内容已边生成边推过，落库后再推一次会让用户
+  看到两条相同内容（id 不同，`mergeMessage` 拦不住）。
 - **历史数据源是 `chat_message` 表，不是 Checkpointer**。Checkpointer 只在
   记录表为空时兜底（存量会话）。有测试锁住这一点。

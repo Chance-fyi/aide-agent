@@ -155,10 +155,31 @@ async def _handle_user_message(
         hub.send(conn, {"type": "error", "message": "消息内容不合法（不能为空，最多 2000 字）"})
         return
 
+    # 流式状态：一条回复的 delta 可能跨多个事件，用起始标记告诉客户端
+    # "从这里开始是一条新气泡"，结束后再补服务端 id/时间戳。
+    # 为什么需要起始标记：客户端在收到第一个 delta 时就要创建占位气泡，
+    # 后续 delta 追加到它上面——没有标记就无法区分"新回复"与"上一条的补充"
+    stream_state = {"started": False, "seq": 0}
+
+    def on_delta(text: str) -> None:
+        if not stream_state["started"]:
+            stream_state["started"] = True
+            hub.send(conn, {"type": "reply_start"})
+        stream_state["seq"] += 1
+        hub.send(conn, {
+            "type": "reply_delta",
+            "delta": text,
+            "seq": stream_state["seq"],
+        })
+
     try:
         # push_reply=True：机器人的回复走推送，函数返回值这里用不上
         outcome = await chat.process_message(
-            req.message, user, push_reply=True, client_ip=client_ip
+            req.message,
+            user,
+            push_reply=True,
+            client_ip=client_ip,
+            on_delta=on_delta,
         )
     except ratelimit.RateLimitExceeded as exc:
         # 限流/繁忙也要回一条明确提示：WS 没有 HTTP 状态码，
@@ -179,6 +200,22 @@ async def _handle_user_message(
             detail = "客服服务暂时不可用，请稍后重试"
         hub.send(conn, {"type": "error", "message": detail})
         return
+
+    # 流式收尾：把服务端落库后的权威消息（含 id/ts）交给客户端，
+    # 客户端据此把占位气泡"转正"——之后若重连/重载，同一个 id 能对齐去重。
+    # 只在真的流过内容时发：安检拦截/已转人工等分支没有流，
+    # 那些情况的内容由普通 message 事件送达。
+    if stream_state["started"]:
+        hub.send(conn, {
+            "type": "reply_end",
+            "thread_id": outcome.thread_id,
+            "message": {
+                "id": outcome.reply_id,
+                "role": "agent",
+                "content": outcome.reply,
+                "ts": outcome.reply_ts,
+            },
+        })
 
     # 发送确认：无论本轮有没有机器人回复，都要告诉客户端"消息已被接收"。
     # 为什么单独一个事件而不是靠"回复"去推断：已转人工（尤其坐席已接入）时
