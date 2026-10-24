@@ -30,6 +30,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from app.agents import handoff, summarize
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.llm import get_llm
 
@@ -122,12 +123,18 @@ def search_kb(query: str) -> str:
     from app.rag import store  # 延迟导入，避免循环依赖
 
     try:
-        hits = store.search(query, top_k=get_settings().retrieval_top_k)
+        with metrics.timer(metrics.RETRIEVAL_DURATION):
+            hits = store.search(query, top_k=get_settings().retrieval_top_k)
+        # 结果条数按档计数（0 / 1-2 / 3+）：空结果率是检索质量最直接的信号，
+        # 用分档而不是精确条数，避免标签基数随 top_k 配置变化
+        n = len(hits)
+        metrics.RETRIEVAL_RESULTS.inc(1, "none" if n == 0 else ("few" if n < 3 else "many"))
     except Exception:
         # 降级：知识库故障（Milvus 挂掉/未建库）是最常见的局部故障，
         # 不应拖垮整个对话。把故障告知作为工具结果交还 LLM，
         # 由它向用户致歉并引导转人工——对话继续、故障可控
         logger.exception("search_kb 检索失败 query=%r", query)
+        metrics.RETRIEVAL_RESULTS.inc(1, "error")
         return (
             "【系统提示】知识库暂时无法访问。请向用户致歉并说明系统繁忙、"
             "暂时无法查询知识库，建议稍后重试；如用户急需帮助，"
@@ -169,6 +176,7 @@ def transfer_to_human(reason: str, config: RunnableConfig) -> str:
     不占用 LLM 的参数位——用它可以拿到 thread_id 做业务落库。
     """
     thread_id = config["configurable"]["thread_id"]
+    metrics.TRANSFERS.inc(1, "llm")
     handoff.mark_pending_human(thread_id, reason=f"LLM判断: {reason}")
     return f"已发起人工转接，原因：{reason}"
 
@@ -255,6 +263,7 @@ async def route_input(state: AgentState, config: RunnableConfig) -> str:
         text = last_user.content
         if any(kw in text for kw in get_settings().transfer_keyword_list):
             logger.info("关键词兜底触发转接: thread=%s", thread_id)
+            metrics.TRANSFERS.inc(1, "keyword")
             handoff.mark_pending_human(thread_id, reason=f"关键词命中: {text[:50]}")
             return "transfer"
 

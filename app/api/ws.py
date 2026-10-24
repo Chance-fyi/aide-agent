@@ -27,7 +27,7 @@ from app.agents import handoff
 from app.api import chat
 from app.api.chat import THREAD_ID_PATTERN
 from app.api.schemas import ChatRequest
-from app.core import ratelimit
+from app.core import metrics, ratelimit
 from app.core.config import get_settings
 from app.core.hub import Connection, hub
 from app.core.security import ROLE_AGENT, decode_token
@@ -111,6 +111,7 @@ async def chat_socket(ws: WebSocket) -> None:
 
     conn = Connection(ws=ws, user_id=user["id"])
     await hub.add(conn)
+    metrics.WS_CONNECTIONS.inc(1, "user")
     # 匿名限流键用握手时的客户端 IP（与 REST 的 _client_ip 同一口径，
     # 但 WS 拿不到 X-Forwarded-For 之外的 request 对象，这里直接用 scope 的 client）
     client_ip = ws.client.host if ws.client else None
@@ -143,6 +144,7 @@ async def chat_socket(ws: WebSocket) -> None:
         logger.exception("用户端 WS 异常退出 user=%s", user["id"])
     finally:
         hub.remove(conn)
+        metrics.WS_CONNECTIONS.dec(1, "user")
 
 async def _handle_user_message(
     conn: Connection, user: dict, content, client_ip: str | None = None,
@@ -259,6 +261,7 @@ async def agent_socket(ws: WebSocket) -> None:
 
     conn = Connection(ws=ws, agent_id=user["id"])
     await hub.add(conn)
+    metrics.WS_CONNECTIONS.inc(1, "agent")
     try:
         try:
             threads = await asyncio.to_thread(handoff.list_live_threads, user["id"])
@@ -290,3 +293,4 @@ async def agent_socket(ws: WebSocket) -> None:
         logger.exception("坐席端 WS 异常退出 agent=%s", user["id"])
     finally:
         hub.remove(conn)
+        metrics.WS_CONNECTIONS.dec(1, "agent")

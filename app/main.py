@@ -16,11 +16,12 @@ from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.debug_routes import register_debug_routes
 from app.api.kb_admin import router as kb_router
-from app.api.routes import agent_router, router
+from app.api.routes import agent_router, router, stats_router
 from app.api.ws import router as ws_router
-from app.core import migrations
+from app.core import metrics, migrations
 from app.core.config import get_settings
 from app.core.hub import hub
+from app.core.metrics import MetricsMiddleware
 
 # 日志基础配置：生产部署时由 gunicorn/uvicorn 参数或环境变量接管更细粒度的配置，
 # 这里保证"无论谁启动进程，异常都能以统一格式落到 stderr"
@@ -113,6 +114,9 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_warmup())
 
+    # 指标定时落盘：多 worker 下让各进程的计数能被合并到同一个 /metrics
+    metrics_flusher = asyncio.create_task(metrics.flush_loop())
+
     # 跨进程事件总线：多 worker 部署时推送能跨进程送达。
     # 启动失败只降级（退回单进程），不让总线成为启动前提
     from app.core.bus import bus
@@ -126,7 +130,14 @@ async def lifespan(app: FastAPI):
     # 后台巡检：排队超时的会话自动回退 active（间隔可配）
     sweeper = asyncio.create_task(_queue_sweeper())
     yield
-    # 关闭：先停巡检任务与事件总线，再释放 Agent 的 Checkpointer 连接池。
+    # 关闭：先停指标落盘与巡检任务
+    metrics_flusher.cancel()
+    try:
+        await metrics_flusher
+    except asyncio.CancelledError:
+        pass
+
+    # 再停事件总线，再释放 Agent 的 Checkpointer 连接池。
     # 总线要先停：它自己持有两条 Postgres 连接，不关会拖慢进程退出
     await bus.stop()
     sweeper.cancel()
@@ -150,12 +161,17 @@ app = FastAPI(
 app.include_router(router)
 app.include_router(auth_router)
 app.include_router(agent_router)
+app.include_router(stats_router)
 app.include_router(chat_router)
 # 知识库管理：正式路由（生产可用，要求坐席登录），与 /debug/kb 分工不同
 app.include_router(kb_router)
 # WebSocket：双端实时推送（/ws/chat 用户端、/ws/agent 坐席端）
 app.include_router(ws_router)
 register_debug_routes(app)  # 调试路由：debug=False 时不注册
+
+# 指标中间件：统计请求数与耗时。
+# 放在 CORS 之前注册（add_middleware 是后进先出，这里要让它包住业务路由）
+app.add_middleware(MetricsMiddleware)
 
 # CORS：前端(5173)与后端(8000)端口不同源，浏览器会拦截跨域 fetch。
 # 白名单走配置（cors_origins）：WebSocket 握手也要校验 Origin，

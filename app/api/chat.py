@@ -13,6 +13,7 @@
 """
 
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ from app.api.schemas import (
     SessionMessage,
     SessionSummary,
 )
-from app.core import guardrails, ratelimit, tracing
+from app.core import guardrails, metrics, ratelimit, tracing
 from app.core.config import get_settings
 from app.core.hub import hub
 
@@ -91,6 +92,39 @@ def _friendly_llm_error(exc: Exception) -> tuple[int, str]:
         logger.critical("LLM 认证失败，请检查 LLM_API_KEY 配置")
         return 503, "客服服务暂时不可用，请稍后重试"
     return 503, "客服服务暂时不可用，请稍后重试"
+
+def _error_kind(exc: Exception) -> str:
+    """把 LLM 异常归成有限的几类，用作指标标签。
+
+    为什么不能直接把异常类名当标签：异常类型可能很多（含厂商 SDK 的内部类），
+    每个新类型都会创建一条新的时间序列。归成固定几类才能安全地做长期趋势。
+    """
+    if isinstance(exc, openai.APITimeoutError):
+        return "timeout"
+    if isinstance(exc, openai.APIConnectionError):
+        return "connection"
+    if isinstance(exc, openai.RateLimitError):
+        return "ratelimit"
+    if isinstance(exc, openai.AuthenticationError):
+        return "auth"
+    return "other"
+
+def _record_usage(output) -> None:
+    """记录一次模型调用的 token 用量。
+
+    usage_metadata 来自厂商响应，不一定存在（部分兼容接口不返回）——
+    缺失时静默跳过，不能让指标采集影响对话本身。
+    cache_read 单独计：它反映前缀缓存命中量，是成本优化的关键观测点。
+    """
+    usage = getattr(output, "usage_metadata", None)
+    if not usage:
+        return
+    metrics.LLM_TOKENS.inc(usage.get("input_tokens", 0) or 0, "input")
+    metrics.LLM_TOKENS.inc(usage.get("output_tokens", 0) or 0, "output")
+    details = usage.get("input_token_details") or {}
+    cache_read = details.get("cache_read", 0) or 0
+    if cache_read:
+        metrics.LLM_CACHE_READ_TOKENS.inc(cache_read)
 
 def _get_thread_status(thread_id: str) -> str:
     """查询会话转接状态，查询失败降级为 active。
@@ -246,11 +280,14 @@ async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None
     config = _agent_config(thread_id, user_id)
     try:
         graph = await get_graph()
-        result = await graph.ainvoke(
-            {"messages": [HumanMessage(content=message)]},
-            config,
-        )
+        with metrics.timer(metrics.LLM_DURATION):
+            result = await graph.ainvoke(
+                {"messages": [HumanMessage(content=message)]},
+                config,
+            )
+        metrics.LLM_CALLS.inc(1, "ok")
     except Exception as exc:
+        metrics.LLM_CALLS.inc(1, _error_kind(exc))
         # 捕获并记录完整异常后转为友好提示：对外不泄露堆栈，对内留全日志。
         # LLM 超时/限流/断连在 get_llm 的 max_retries=2 仍失败后走到这里，
         # 按异常类别给出不同的可操作文案，而不是千篇一律的"服务不可用"
@@ -289,12 +326,32 @@ async def _stream_agent(
     """
     config = _agent_config(thread_id, user_id)
     parts: list[str] = []
+    first_token_at: float | None = None
+    model_started_at: float | None = None
+    started_at = time.monotonic()
     try:
         graph = await get_graph()
         async for event in graph.astream_events(
             {"messages": [HumanMessage(content=message)]}, config, version="v2"
         ):
-            if event["event"] != "on_chat_model_stream":
+            kind = event["event"]
+            # LLM 调用指标按事件成对计时，而不是用整个流的总耗时。
+            # 为什么必须这样：一轮对话至少调两次模型（工具轮 + 最终轮），
+            # 用总耗时会把"检索 + 两次模型"混成一个数，既不能反映单次
+            # 调用质量，也会把调用次数算成 1。
+            if kind == "on_chat_model_start":
+                model_started_at = time.monotonic()
+                continue
+            if kind == "on_chat_model_end":
+                if model_started_at is not None:
+                    metrics.LLM_DURATION.observe(time.monotonic() - model_started_at)
+                    model_started_at = None
+                # token 用量只在 on_chat_model_end 里：流式 chunk 本身不带 usage。
+                # 一轮对话可能调用多次模型，必须逐次累加
+                _record_usage(event["data"].get("output"))
+                metrics.LLM_CALLS.inc(1, "ok")
+                continue
+            if kind != "on_chat_model_stream":
                 continue
             chunk = event["data"]["chunk"]
             # 工具调用轮次的 chunk 没有正文（content 为空），跳过；
@@ -302,9 +359,15 @@ async def _stream_agent(
             text = getattr(chunk, "content", "") or ""
             if not text:
                 continue
+            if first_token_at is None:
+                # TTFT 从收到用户消息算起，而不是从模型开始生成算起——
+                # 用户感知的是"我发出去多久后看到第一个字"，含检索时间
+                first_token_at = time.monotonic()
+                metrics.CHAT_TTFT.observe(first_token_at - started_at)
             parts.append(text)
             on_delta(text)
     except Exception as exc:
+        metrics.LLM_CALLS.inc(1, _error_kind(exc))
         logger.exception("chat 流式执行失败 thread=%s", thread_id)
         status_code, detail = _friendly_llm_error(exc)
         raise HTTPException(status_code=status_code, detail=detail) from None
@@ -393,11 +456,13 @@ async def process_message(
     if get_settings().input_guardrail:
         category = guardrails.check_message(message)
         if category:
+            metrics.CHAT_MESSAGES.inc(1, "ws" if push_reply else "rest", "guarded")
             return _handle_guarded(thread_id, message, category, uid, push_reply=push_reply)
 
     # 已转接会话：用户消息直达人工
     status = _get_thread_status(thread_id)
     if handoff.is_live_status(status):
+        metrics.CHAT_MESSAGES.inc(1, "ws" if push_reply else "rest", "live")
         return _handle_live(thread_id, message, status, uid)
 
     # 正常自助问答。
@@ -411,6 +476,8 @@ async def process_message(
     # 落库是毫秒级操作，限它反而会在繁忙时丢掉用户消息
     guard = ratelimit.get_guard()
     await guard.acquire()
+    channel = "ws" if push_reply else "rest"
+    turn_started = time.monotonic()
     try:
         if on_delta is not None:
             text = await _stream_agent(thread_id, message, uid, on_delta)
@@ -420,6 +487,10 @@ async def process_message(
         # finally 里释放：LLM 超时/抛异常也必须归还名额，
         # 否则几个失败请求就能把闸门永久占满
         guard.release()
+
+    # 对话整体耗时（含检索 + LLM + 落库）：这才是用户感知的等待时间
+    metrics.CHAT_DURATION.observe(time.monotonic() - turn_started, channel)
+    metrics.CHAT_MESSAGES.inc(1, channel, "answered")
 
     saved_agent = _append_safe(thread_id, ROLE_AGENT, text)
     _notify_agents_message(thread_id, ROLE_AGENT, text, saved_agent)

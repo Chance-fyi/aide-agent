@@ -142,6 +142,11 @@ class ConcurrencyGuard:
         try:
             await asyncio.wait_for(self._semaphore().acquire(), timeout=self.wait_sec)
         except TimeoutError:
+            from app.core import metrics
+
+            # 闸门拿不到名额也是"系统过载"的信号，与限流分开统计：
+            # 前者说明容量不够（该扩容），后者说明有人在刷（该拦）
+            metrics.RATELIMIT_HITS.inc(1, "concurrency")
             raise BusyError() from None
 
     def release(self) -> None:
@@ -177,9 +182,12 @@ def reset() -> None:
 
 def check_rate(key: str) -> None:
     """按 key 检查限流，超限抛 RateLimitExceeded。"""
+    from app.core import metrics
+
     limiter = get_limiter()
     allowed, retry_after = limiter.allow(key)
     if not allowed:
         logger.warning("触发限流 key=%s retry_after=%ds", key, retry_after)
+        metrics.RATELIMIT_HITS.inc(1, "window")
         raise RateLimitExceeded(retry_after)
     limiter.prune()

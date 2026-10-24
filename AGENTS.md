@@ -58,6 +58,7 @@ app/
     config.py        # 全部配置（pydantic-settings，读 .env）
     migrations.py    # 数据库迁移：版本表 + 有序迁移列表（DDL 的唯一来源）
     ratelimit.py     # 限流（滑动窗口）+ 并发闸门（保护 LLM 与连接池）
+    metrics.py       # 聚合指标：计数器/仪表/直方图 + 跨进程合并 + HTTP 中间件
     hub.py           # WebSocket 连接中心：寻址推送、每连接 outbox
     bus.py           # 跨进程事件总线（Postgres LISTEN/NOTIFY，zlib+base64 编码）
     llm.py guardrails.py security.py users.py tracing.py
@@ -155,5 +156,11 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
   LLM 和 Milvus，表现为"卡死不返回"而不是失败。改路径前先 `grep` 测试里的 monkeypatch。
 - **流式回复不能再次整体推送**。内容已边生成边推过，落库后再推一次会让用户
   看到两条相同内容（id 不同，`mergeMessage` 拦不住）。
+- **指标标签只能是有限枚举**。绝不能把 `thread_id` / `user_id` / 查询文本当标签，
+  每个新值都是一条新时间序列。HTTP 路径必须过 `normalize_path()`。
+- **单端口多 worker 下 `/metrics` 只落到随机一个 worker**。本项目的指标自带
+  跨进程合并（`METRICS_DIR` 文件快照 + `flush_loop` 定时落盘），
+  改指标相关代码时不要绕过 `render_prometheus_aggregated()`。
+- **直方图分位数不可加，桶计数可加**。跨进程合并必须合并桶再算分位。
 - **历史数据源是 `chat_message` 表，不是 Checkpointer**。Checkpointer 只在
   记录表为空时兜底（存量会话）。有测试锁住这一点。

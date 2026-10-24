@@ -16,7 +16,7 @@
 | 多实例 | Postgres LISTEN/NOTIFY 跨进程总线，支持 `--workers N`；不可用时自动降级单进程 |
 | 输入防护 | 提示注入检测 + 违禁词拦截，命中即友好拒答并留痕 |
 | 限流保护 | 按账号/ IP 滑动窗口限流 + LLM 并发闸门（超限快速失败而非无限排队） |
-| 可观测 | Langfuse trace（LLM / 工具 / LangGraph 节点 span），未配置时零侵入 no-op |
+| 可观测 | Langfuse trace（单次对话）+ `/metrics` 聚合指标（QPS/P95/token，多 worker 自动合并） |
 | 知识库管理 | `/kb` 页面：状态读数、按文件切分策略、异步重建、检索验证（坐席登录） |
 | 评估 | 黄金问答集 + 检索/生成两层跑分（`scripts/run_eval.py`） |
 
@@ -100,6 +100,7 @@ cd web && npm run lint && npm run build  # 前端 lint / 构建
 
 uv run python -m app.core.migrations      # 应用数据库迁移
 uv run python -m app.core.migrations --status  # 查看迁移版本
+curl -s http://127.0.0.1:8000/metrics | head  # 聚合指标（Prometheus 格式）
 uv run python scripts/create_agent.py    # 创建坐席账号
 uv run python scripts/run_eval.py        # 评估：只跑检索层（不花 LLM 费用）
 uv run python scripts/run_eval.py --full # 评估：完整链路（检索 + 生成 + 转人工判断）

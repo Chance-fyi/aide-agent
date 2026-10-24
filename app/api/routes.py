@@ -6,6 +6,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Path
+from fastapi.responses import PlainTextResponse
 
 from app.agents import handoff
 from app.api.chat import ROLE_HUMAN, THREAD_ID_PATTERN
@@ -16,6 +17,7 @@ from app.api.schemas import (
     AgentUserHistoryResponse,
     SessionMessage,
 )
+from app.core import metrics
 from app.core.bus import bus
 from app.core.config import get_settings
 from app.core.hub import hub
@@ -23,6 +25,8 @@ from app.core.hub import hub
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+# 需要坐席鉴权的统计路由（与 router 分开，避免给 /health /metrics 也套上鉴权）
+stats_router = APIRouter(tags=["metrics"])
 
 @router.get("/health")
 async def health():
@@ -42,6 +46,32 @@ async def health():
         "event_bus": bus_info,
     }
 
+
+@router.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus 抓取端点（text format）。
+
+    为什么不需要鉴权：它只暴露聚合计数，不含任何用户数据
+    （标签是有限枚举，没有 thread_id/user_id）。生产环境应由
+    反向代理限制来源 IP，而不是靠应用层鉴权——否则 Prometheus
+    就得配一套 Token 轮换。
+
+    多 worker 部署：每个进程独立暴露自己的计数，由 Prometheus 分别抓取
+    再聚合（`sum()` / `histogram_quantile()`）。这正是 Prometheus 的
+    原生模型，不需要 multiprocess mode。
+    """
+    # 用聚合版：多 worker 下合并各进程计数（单 worker 行为不变）
+    return PlainTextResponse(metrics.render_prometheus_aggregated())
+
+@stats_router.get("/stats")
+async def aggregate_stats(agent: AgentUser):
+    """聚合指标 JSON（给管理台/人工排障看）。
+
+    与 /metrics 的区别：这里是**当前进程**的可读快照（含 P50/P95/P99），
+    直接能看懂；/metrics 是给机器抓取的时序格式。
+    要求坐席登录：里面能看出流量与成本，不适合对公网裸奔。
+    """
+    return {"pid_note": "仅当前进程的计数；多 worker 请用 /metrics 聚合", **metrics.snapshot()}
 
 # 坐席操作接口（模拟坐席端/管理后台的数据入口）
 # 每个接口要求坐席账号登录（require_agent 依赖），坐席身份取自登录态，
