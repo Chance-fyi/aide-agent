@@ -176,7 +176,10 @@ function AgentConsoleInner({ auth, onLogout }) {
   }, [history, userHistory]);
 
   // 加载用户完整历史流（打开会话时调用一次）。
-  // 匿名会话（无归属用户）返回空列表，保持 null 以便回退到 thread history
+  // 匿名会话（无归属用户）返回空列表，保持 null 以便回退到 thread history。
+  //
+  // 会话守卫：坐席快速连点两个工单时，先发的请求可能**后**返回，
+  // 把面板刷成上一个工单的内容。所以回写前确认"当前选中的还是它"。
   async function loadUserHistory(threadId) {
     try {
       const resp = await authFetch(
@@ -185,6 +188,7 @@ function AgentConsoleInner({ auth, onLogout }) {
       );
       if (!resp.ok) return;
       const data = await resp.json();
+      if (selectedRef.current?.thread_id !== threadId) return;   // 已切走，丢弃
       if (data.messages?.length) setUserHistory(data.messages);
     } catch {
       // 加载失败静默：详情面板继续展示当前 thread 历史，不阻断
@@ -206,6 +210,8 @@ function AgentConsoleInner({ auth, onLogout }) {
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
+      // 守卫同上：慢响应回来时用户可能已经点了别的工单
+      if (selectedRef.current?.thread_id !== threadId) return;
       setHistory(data.messages ?? []);
       setSelected((sel) => (sel ? { ...sel, status: data.status } : null));
       loadUserHistory(threadId);

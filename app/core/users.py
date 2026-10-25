@@ -5,18 +5,24 @@
 """
 
 import logging
+from collections.abc import Iterator
 
 import psycopg
 
-from app.core.config import get_settings
+from app.core.db import get_conn
 from app.core.security import ROLE_AGENT, ROLE_USER, hash_password, verify_password
 
 logger = logging.getLogger(__name__)
 
 
-def _get_conn() -> psycopg.Connection:
-    s = get_settings()
-    return psycopg.connect(s.postgres_dsn, autocommit=True)
+def _get_conn() -> Iterator[psycopg.Connection]:
+    """借一条池化连接（不再每次新建 TCP 连接）。
+
+    实测一轮对话会触发 14 次同步 DB 往返，原先每次都 `psycopg.connect()`
+    ——既慢（建连约 1-2ms）又会把 Postgres 连接数打满。
+    现在统一走 `app/core/db.py` 的进程级连接池。
+    """
+    return get_conn()
 
 
 def ensure_table() -> None:

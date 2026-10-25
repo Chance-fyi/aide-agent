@@ -156,7 +156,25 @@ function UserChatInner({ auth, onLogout }) {
             setTransferred(isLiveStatus(ev.status));
             break;
           case "error":
-            // 后端给的是可操作文案（校验失败/LLM 故障），直接展示
+            // 后端给的是可操作文案（校验失败/LLM 故障），直接展示。
+            // 关键：先把流式占位气泡收尾——LLM 在**流式途中**失败时，
+            // 已推出的半截内容还挂在 streaming 状态上，不处理就会留下
+            // 一个永远闪烁的光标（用户以为还在生成，其实早就断了）
+            setStreaming(false);
+            setMessages((prev) => {
+              if (prev.length === 0) return prev;
+              const last = prev[prev.length - 1];
+              if (!last.streaming) return prev;
+              const next = prev.slice();
+              // 有半截内容就保留（用户能看到生成到哪），只是停止闪烁；
+              // 完全空白的占位直接丢掉，避免留一个空气泡
+              if (last.content) {
+                next[next.length - 1] = { ...last, streaming: false, aborted: true };
+              } else {
+                next.pop();
+              }
+              return next;
+            });
             appendMessage({ role: ROLE.AGENT, content: ev.message });
             clearPending();
             break;
@@ -289,6 +307,7 @@ function UserChatInner({ auth, onLogout }) {
               label={m.role === ROLE.USER ? "你" : undefined}
               // 流式中的气泡在末尾显示光标（纯装饰，读屏靠 aria-live 播报）
               streaming={m.streaming}
+              aborted={m.aborted}
             />
           ))}
 

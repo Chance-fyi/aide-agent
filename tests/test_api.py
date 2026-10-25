@@ -16,6 +16,7 @@ import openai
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.agents import executor as executor_mod
 from app.api import chat as chat_mod
 from app.core.security import ROLE_AGENT, create_token
 from app.core.users import create_user, ensure_table
@@ -273,7 +274,9 @@ async def test_chat_llm_timeout_friendly_error(client, monkeypatch):
     async def boom():
         raise _timeout_error()
 
-    monkeypatch.setattr(chat_mod, "get_graph", boom)
+    # get_graph 现在由 app/agents/executor.py 调用（执行层已从 chat.py 抽出），
+    # 打桩点必须跟着改——否则打桩静默失效，测试会真的去连模型
+    monkeypatch.setattr(executor_mod, "get_graph", boom)
     resp = await client.post("/chat", json={"message": "你好"})
     assert resp.status_code == 503
     assert "超时" in resp.json()["detail"]
@@ -287,7 +290,7 @@ async def test_chat_llm_rate_limit_friendly_error(client, monkeypatch):
             "rate limited", response=httpx.Response(429, request=request), body=None
         )
 
-    monkeypatch.setattr(chat_mod, "get_graph", boom)
+    monkeypatch.setattr(executor_mod, "get_graph", boom)
     resp = await client.post("/chat", json={"message": "你好"})
     assert resp.status_code == 503
     assert "人数较多" in resp.json()["detail"]
@@ -410,3 +413,53 @@ async def test_history_falls_back_to_checkpointer_when_no_chat_message(client, m
     h = await client.get(f"/chat/{uuid.uuid4()}/history")
     assert h.status_code == 200
     assert [m["content"] for m in h.json()["messages"]] == ["老会话的提问", "老会话的回答"]
+
+# ---------- 回归：history 端点必须透传 id / sender_name ----------
+
+async def test_history_includes_message_id_and_sender_name(client, agent_headers):
+    """`/chat/{thread_id}/history` 必须带 `id` 与 `sender_name`。
+
+    回归一个真实 bug：端点只挑 role/content/ts 构造 SessionMessage，把
+    - `id` 丢了 → 前端无法按主键去重（WS 推送与历史两条路径对不上），
+      step-40.1 修过的"重复气泡"会重新出现
+    - `sender_name` 丢了 → 坐席端显示"人工坐席"而不是具体坐席昵称
+    """
+    # 造一条用户消息 + 一条坐席回复（走关键词转接，不依赖 LLM）
+    r = await client.post("/chat", json={"message": "我要转人工"})
+    tid = r.json()["thread_id"]
+    assert (await client.post(
+        f"/agent/threads/{tid}/accept", headers=agent_headers, json={}
+    )).status_code == 200
+    reply = await client.post(
+        f"/agent/threads/{tid}/reply",
+        json={"content": "坐席的回复"}, headers=agent_headers,
+    )
+    assert reply.status_code == 200
+
+    h = await client.get(f"/chat/{tid}/history")
+    assert h.status_code == 200
+    msgs = h.json()["messages"]
+
+    assert all(m["id"] is not None for m in msgs), "每条消息都必须带主键 id"
+    human = [m for m in msgs if m["role"] == "human"]
+    assert human, "应有坐席回复"
+    assert human[0]["sender_name"] == _AGENT_NAME, (
+        f"坐席昵称必须透传，实际 {human[0]['sender_name']!r}"
+    )
+
+async def test_history_ids_match_push_payload(client, agent_headers):
+    """历史里的 id 必须与 WS 推送 / REST 响应体里的 id 同源。
+
+    这是前端能跨路径去重的前提：同一 DB 行的 id 在任何出口都一致。
+    """
+    r = await client.post("/chat", json={"message": "转人工"})
+    tid = r.json()["thread_id"]
+    await client.post(f"/agent/threads/{tid}/accept", headers=agent_headers, json={})
+    reply = await client.post(
+        f"/agent/threads/{tid}/reply", json={"content": "对齐检查"}, headers=agent_headers,
+    )
+    rest_id = reply.json()["message"]["id"]
+
+    h = await client.get(f"/chat/{tid}/history")
+    ids = [m["id"] for m in h.json()["messages"]]
+    assert rest_id in ids, f"REST 响应里的 id {rest_id} 应出现在历史里: {ids}"

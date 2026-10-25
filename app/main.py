@@ -18,7 +18,7 @@ from app.api.debug_routes import register_debug_routes
 from app.api.kb_admin import router as kb_router
 from app.api.routes import agent_router, router, stats_router
 from app.api.ws import router as ws_router
-from app.core import metrics, migrations
+from app.core import db, metrics, migrations
 from app.core.config import get_settings
 from app.core.hub import hub
 from app.core.metrics import MetricsMiddleware
@@ -112,7 +112,9 @@ async def lifespan(app: FastAPI):
 
         await asyncio.to_thread(embedder.warmup)
 
-    asyncio.create_task(_warmup())
+    # 保存引用：不保存的任务在关闭时无法取消，会报 "Task was destroyed but it
+    # is pending"，且 19 秒的模型加载会拖着进程退不干净
+    warmup_task = asyncio.create_task(_warmup())
 
     # 指标定时落盘：多 worker 下让各进程的计数能被合并到同一个 /metrics
     metrics_flusher = asyncio.create_task(metrics.flush_loop())
@@ -130,7 +132,17 @@ async def lifespan(app: FastAPI):
     # 后台巡检：排队超时的会话自动回退 active（间隔可配）
     sweeper = asyncio.create_task(_queue_sweeper())
     yield
-    # 关闭：先停指标落盘与巡检任务
+    # 关闭：先停预热任务（可能还在加载模型）
+    warmup_task.cancel()
+    try:
+        await warmup_task
+    except asyncio.CancelledError:
+        pass          # 正常取消路径
+    except Exception:
+        # 预热失败不影响关闭流程（它本来只是优化）
+        logger.debug("预热任务异常退出", exc_info=True)
+
+    # 再停指标落盘与巡检任务
     metrics_flusher.cancel()
     try:
         await metrics_flusher
@@ -147,6 +159,9 @@ async def lifespan(app: FastAPI):
         pass
     # close() 是协程，必须 await：早先漏了 await，连接池从未被真正关闭
     await runtime.close()
+    # 同步业务连接池也要显式关闭：不关的话池内线程在解释器退出时才被回收，
+    # 会抛 "PythonFinalizationError: cannot join thread at interpreter shutdown"
+    db.close()
     # Langfuse 是批量异步上报，不 flush 会丢掉缓冲区里的 span
     tracing.shutdown()
 

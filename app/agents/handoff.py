@@ -18,10 +18,12 @@ MVP 用同步 psycopg：转接是低频操作，简单可靠优先。
 """
 
 import logging
+from collections.abc import Iterator
 
 import psycopg
 
 from app.core.config import get_settings
+from app.core.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,14 @@ STATUS_CLOSED = "closed"                # 坐席处理完成
 _LIVE_STATUSES = {STATUS_QUEUED, STATUS_IN_SERVICE}
 
 
-def _get_conn() -> psycopg.Connection:
-    s = get_settings()
-    return psycopg.connect(s.postgres_dsn, autocommit=True)
+def _get_conn() -> Iterator[psycopg.Connection]:
+    """借一条池化连接（不再每次新建 TCP 连接）。
+
+    实测一轮对话会触发 14 次同步 DB 往返，原先每次都 `psycopg.connect()`
+    ——既慢（建连约 1-2ms）又会把 Postgres 连接数打满。
+    现在统一走 `app/core/db.py` 的进程级连接池。
+    """
+    return get_conn()
 
 
 def ensure_table() -> None:
@@ -116,7 +123,9 @@ def list_live_threads(agent_id: int | None = None) -> list[dict]:
             WHERE cs.status = ANY(%s)
               -- 处理中的会话只归属接入者本人；排队的对所有坐席可见
               AND (cs.status = %s OR cs.agent_id = %s::bigint OR %s::bigint IS NULL)
-            ORDER BY updated_at ASC           -- 先转接的排前面，先进先出
+            -- 先进先出：按**进队列时间**排，不能用 updated_at ——
+            -- 那一列会被"用户补发消息时补归属"刷新，导致排队中的人被挪到队尾
+            ORDER BY COALESCE(cs.queued_at, cs.created_at) ASC
             """,
             (list(_LIVE_STATUSES), STATUS_QUEUED, agent_id, agent_id),
         ).fetchall()
@@ -168,16 +177,28 @@ def _notify_status(thread_id: str, status: str) -> None:
 
 
 def mark_pending_human(thread_id: str, reason: str) -> None:
-    """标记会话进入人工排队（幂等：重复转接只更新原因）。"""
+    """标记会话进入人工排队（幂等：重复转接只更新原因）。
+
+    queued_at 只在**从非排队态进入排队**时刷新：
+    已经排队的会话再次触发转接（LLM 又判断了一次）不该重置排队时间，
+    否则用户一直触发转接就能无限"插队到队首"或让超时永不生效。
+    """
     with _get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO conversation_status (thread_id, status, reason)
-            VALUES (%s, %s, %s)
+            INSERT INTO conversation_status (thread_id, status, reason, queued_at)
+            VALUES (%s, %s, %s, now())
             ON CONFLICT (thread_id)
-            DO UPDATE SET status = %s, reason = %s, updated_at = now()
+            DO UPDATE SET
+                status    = %s,
+                reason    = %s,
+                -- 只在从别的状态进入排队时刷新排队时间（见 docstring）
+                queued_at = CASE WHEN conversation_status.status = %s
+                                 THEN conversation_status.queued_at
+                                 ELSE now() END,
+                updated_at = now()
             """,
-            (thread_id, STATUS_QUEUED, reason, STATUS_QUEUED, reason),
+            (thread_id, STATUS_QUEUED, reason, STATUS_QUEUED, reason, STATUS_QUEUED),
         )
     logger.info("会话已转接(排队): thread=%s reason=%s", thread_id, reason)
     _notify_status(thread_id, STATUS_QUEUED)
@@ -194,7 +215,9 @@ def agent_accept(thread_id: str, agent_name: str, agent_id: int) -> bool:
         row = conn.execute(
             """
             UPDATE conversation_status
-            SET status = %s, agent_name = %s, agent_id = %s, updated_at = now()
+            SET status = %s, agent_name = %s, agent_id = %s,
+                -- 已离开排队态：清空排队时间，避免残留旧值影响下次判断
+                queued_at = NULL, updated_at = now()
             WHERE thread_id = %s AND status = %s
             RETURNING thread_id
             """,
@@ -234,6 +257,7 @@ def agent_close(thread_id: str, resolution: str, agent_id: int | None = None) ->
             SET status = %s,
                 resolution = %s,
                 reason = COALESCE(reason, '') || ' | 结束: ' || %s,
+                queued_at = NULL,
                 updated_at = now()
             WHERE thread_id = %s AND status IN (%s, %s)
               -- 服务中的会话：仅接入者本人可关闭；排队中：任何坐席可接单即关
@@ -263,7 +287,8 @@ def reset_active(thread_id: str) -> None:
     """复位为 active：closed 会话里来了新消息，视为新问题回自助服务。"""
     with _get_conn() as conn:
         conn.execute(
-            "UPDATE conversation_status SET status = %s, updated_at = now() WHERE thread_id = %s",
+            "UPDATE conversation_status SET status = %s, queued_at = NULL, "
+            "updated_at = now() WHERE thread_id = %s",
             (STATUS_ACTIVE, thread_id),
         )
     _notify_status(thread_id, STATUS_ACTIVE)
@@ -319,6 +344,10 @@ def set_thread_user(thread_id: str, user_id: int) -> None:
     纯 UPDATE 会匹配 0 行静默无效（首条消息时状态行可能尚未存在）。
     无行则插入 active 状态行，与 get_status 的"无记录视为 active"语义一致；
     已有行则只补归属，不覆盖现有转接状态。
+
+    **不碰 updated_at**：这个函数每条消息都会被调用（_resolve_thread），
+    若顺手刷新时间戳，会让排队会话的 FIFO 顺序与"最后活跃时间"全部失真。
+    归属写入不是"会话发生了业务变化"，不该改状态时间。
     """
     try:
         with _get_conn() as conn:
@@ -327,7 +356,7 @@ def set_thread_user(thread_id: str, user_id: int) -> None:
                 INSERT INTO conversation_status (thread_id, status, user_id)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (thread_id)
-                DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = now()
+                DO UPDATE SET user_id = EXCLUDED.user_id
                 """,
                 (thread_id, STATUS_ACTIVE, user_id),
             )
@@ -405,6 +434,10 @@ def sweep_timed_out() -> list[str]:
 
     只回退 queued：in_service 表示坐席正在处理，更不应自动打断；
     回退而非关闭，用户再次求助还能重新转接。
+
+    用 `queued_at` 而不是 `updated_at` 判超时：后者会被无关写入扰动，
+    导致"排了两小时没人接但刚好被别的操作刷新了时间戳"而永不超时。
+    `queued_at` 是"进队列那一刻"，语义唯一。
     """
     timeout_min = get_settings().transfer_queue_timeout_min
     with _get_conn() as conn:
@@ -413,9 +446,10 @@ def sweep_timed_out() -> list[str]:
             UPDATE conversation_status
             SET status = %s,
                 reason = COALESCE(reason, '') || ' [排队超时自动回退]',
+                queued_at = NULL,
                 updated_at = now()
             WHERE status = %s
-              AND updated_at < now() - (%s * interval '1 minute')
+              AND COALESCE(queued_at, updated_at) < now() - (%s * interval '1 minute')
             RETURNING thread_id
             """,
             (STATUS_ACTIVE, STATUS_QUEUED, timeout_min),

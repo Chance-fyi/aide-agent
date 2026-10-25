@@ -18,11 +18,10 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import openai
 from fastapi import APIRouter, HTTPException, Path, Request
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agents import handoff
+from app.agents import executor, handoff
 from app.agents.runtime import get_graph
 from app.api.deps import CurrentUser, OptionalUser
 from app.api.schemas import (
@@ -33,7 +32,7 @@ from app.api.schemas import (
     SessionMessage,
     SessionSummary,
 )
-from app.core import guardrails, metrics, ratelimit, tracing
+from app.core import guardrails, metrics, ratelimit
 from app.core.config import get_settings
 from app.core.hub import hub
 
@@ -72,59 +71,6 @@ class ChatOutcome:
     # 之后重连/重载才能按 id 与历史对齐（否则同一条会出现两次）
     reply_id: int | None = None
     reply_ts: str | None = None
-
-def _friendly_llm_error(exc: Exception) -> tuple[int, str]:
-    """把 LLM 链路的异常翻译成（HTTP 状态码, 用户可读文案）。
-
-    原则：对外只说"发生了什么类别的问题 + 该怎么办"，
-    绝不泄露 base_url / 模型名 / 堆栈等内部细节；细节进日志。
-    """
-    # 注意继承关系：APITimeoutError 是 APIConnectionError 的子类，必须先判
-    if isinstance(exc, openai.APITimeoutError):
-        return 503, "AI 服务响应超时，请稍后重试"
-    if isinstance(exc, openai.APIConnectionError):
-        return 503, "暂时无法连接 AI 服务，请稍后重试"
-    if isinstance(exc, openai.RateLimitError):
-        return 503, "当前咨询人数较多，请稍后重试"
-    if isinstance(exc, openai.AuthenticationError):
-        # 配置错误（Key 失效）属于服务端问题，对用户话术与普通故障一致，
-        # 但日志要打 CRITICAL 提醒运维，这是"必须马上修"的故障
-        logger.critical("LLM 认证失败，请检查 LLM_API_KEY 配置")
-        return 503, "客服服务暂时不可用，请稍后重试"
-    return 503, "客服服务暂时不可用，请稍后重试"
-
-def _error_kind(exc: Exception) -> str:
-    """把 LLM 异常归成有限的几类，用作指标标签。
-
-    为什么不能直接把异常类名当标签：异常类型可能很多（含厂商 SDK 的内部类），
-    每个新类型都会创建一条新的时间序列。归成固定几类才能安全地做长期趋势。
-    """
-    if isinstance(exc, openai.APITimeoutError):
-        return "timeout"
-    if isinstance(exc, openai.APIConnectionError):
-        return "connection"
-    if isinstance(exc, openai.RateLimitError):
-        return "ratelimit"
-    if isinstance(exc, openai.AuthenticationError):
-        return "auth"
-    return "other"
-
-def _record_usage(output) -> None:
-    """记录一次模型调用的 token 用量。
-
-    usage_metadata 来自厂商响应，不一定存在（部分兼容接口不返回）——
-    缺失时静默跳过，不能让指标采集影响对话本身。
-    cache_read 单独计：它反映前缀缓存命中量，是成本优化的关键观测点。
-    """
-    usage = getattr(output, "usage_metadata", None)
-    if not usage:
-        return
-    metrics.LLM_TOKENS.inc(usage.get("input_tokens", 0) or 0, "input")
-    metrics.LLM_TOKENS.inc(usage.get("output_tokens", 0) or 0, "output")
-    details = usage.get("input_token_details") or {}
-    cache_read = details.get("cache_read", 0) or 0
-    if cache_read:
-        metrics.LLM_CACHE_READ_TOKENS.inc(cache_read)
 
 def _get_thread_status(thread_id: str) -> str:
     """查询会话转接状态，查询失败降级为 active。
@@ -259,50 +205,21 @@ def _handle_live(
     ack = _QUEUED_ACK if status == handoff.STATUS_QUEUED else ""
     return ChatOutcome(thread_id, ack, status, True)
 
-# LLM 生成空回复时的兜底话术（前端至少能看到"失败了"，而不是空白气泡）
-_EMPTY_REPLY = "抱歉，刚才的回复没有生成成功，请您再试一次。"
+def _friendly_llm_error(exc: Exception) -> tuple[int, str]:
+    """异常 → (HTTP 状态码, 用户可读文案)。LLM 链路故障一律 503。
 
-def _agent_config(thread_id: str, user_id: int | None):
-    """构造图执行配置（含 Langfuse trace 透传）。"""
-    return tracing.build_config(
-        thread_id,
-        user_id=user_id,
-        trace_name="chat",
-        base={"configurable": {"thread_id": thread_id}},
-    )
+    保留这层薄包装是因为 REST 路由需要 HTTP 语义，而执行层（executor）
+    只给 AgentError —— 两边的关注点不同，转换放在入口层最清楚。
+    """
+    _kind, message = executor.classify_llm_error(exc)
+    return 503, message
 
 async def _invoke_agent(thread_id: str, message: str, user_id: int | None = None) -> str:
-    """执行 Agent 图并一次性取回纯文本回复（REST 入口用）。
-
-    WS 入口走 `_stream_agent`；这里保留非流式实现是因为 REST 响应体
-    本来就要一次给完整文本，用流式反而多绕一圈。
-    """
-    config = _agent_config(thread_id, user_id)
+    """非流式执行（薄包装，转成入口层认识的异常类型）。"""
     try:
-        graph = await get_graph()
-        with metrics.timer(metrics.LLM_DURATION):
-            result = await graph.ainvoke(
-                {"messages": [HumanMessage(content=message)]},
-                config,
-            )
-        metrics.LLM_CALLS.inc(1, "ok")
-    except Exception as exc:
-        metrics.LLM_CALLS.inc(1, _error_kind(exc))
-        # 捕获并记录完整异常后转为友好提示：对外不泄露堆栈，对内留全日志。
-        # LLM 超时/限流/断连在 get_llm 的 max_retries=2 仍失败后走到这里，
-        # 按异常类别给出不同的可操作文案，而不是千篇一律的"服务不可用"
-        logger.exception("chat 执行失败 thread=%s", thread_id)
-        status_code, detail = _friendly_llm_error(exc)
-        raise HTTPException(status_code=status_code, detail=detail) from None
-
-    reply = result["messages"][-1]
-    # content 可能是非字符串形态（分段 content / 空 tool_calls 消息），
-    # 统一走 .text 取纯文本；空回复给兜底话术，避免前端渲染出空白气泡
-    text = reply.text if isinstance(reply, AIMessage) else str(reply.content)
-    if not text.strip():
-        logger.warning("chat 生成空回复 thread=%s", thread_id)
-        return _EMPTY_REPLY
-    return text
+        return await executor.invoke(thread_id, message, user_id)
+    except executor.AgentError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
 
 async def _stream_agent(
     thread_id: str,
@@ -310,73 +227,11 @@ async def _stream_agent(
     user_id: int | None,
     on_delta: Callable[[str], None],
 ) -> str:
-    """流式执行 Agent 图：每生成一段文本就回调 `on_delta`，返回完整文本。
-
-    为什么用 astream_events 而不是 astream：
-    `astream` 只给出**节点级**的输出（agent 节点跑完才拿到整段 AIMessage），
-    拿不到 token。`astream_events` 能捕获 `on_chat_model_stream`，
-    才是真正的逐 token 流。
-
-    **必须过滤空 content**：Agent 是 tool-calling 结构，一轮对话至少两次
-    模型调用（先决定调工具、再根据结果作答）。实测第一轮 100% 是
-    空 content + tool_calls，只有最后一轮才有正文。若不过滤，前端会收到
-    大量空 delta，且可能把工具调用的中间文本当成回答推给用户。
-
-    异常处理与 `_invoke_agent` 一致：翻译成友好 HTTPException。
-    """
-    config = _agent_config(thread_id, user_id)
-    parts: list[str] = []
-    first_token_at: float | None = None
-    model_started_at: float | None = None
-    started_at = time.monotonic()
+    """流式执行（薄包装，转成入口层认识的异常类型）。"""
     try:
-        graph = await get_graph()
-        async for event in graph.astream_events(
-            {"messages": [HumanMessage(content=message)]}, config, version="v2"
-        ):
-            kind = event["event"]
-            # LLM 调用指标按事件成对计时，而不是用整个流的总耗时。
-            # 为什么必须这样：一轮对话至少调两次模型（工具轮 + 最终轮），
-            # 用总耗时会把"检索 + 两次模型"混成一个数，既不能反映单次
-            # 调用质量，也会把调用次数算成 1。
-            if kind == "on_chat_model_start":
-                model_started_at = time.monotonic()
-                continue
-            if kind == "on_chat_model_end":
-                if model_started_at is not None:
-                    metrics.LLM_DURATION.observe(time.monotonic() - model_started_at)
-                    model_started_at = None
-                # token 用量只在 on_chat_model_end 里：流式 chunk 本身不带 usage。
-                # 一轮对话可能调用多次模型，必须逐次累加
-                _record_usage(event["data"].get("output"))
-                metrics.LLM_CALLS.inc(1, "ok")
-                continue
-            if kind != "on_chat_model_stream":
-                continue
-            chunk = event["data"]["chunk"]
-            # 工具调用轮次的 chunk 没有正文（content 为空），跳过；
-            # 这是区分"中间轮次"和"最终回答"最简单可靠的口径
-            text = getattr(chunk, "content", "") or ""
-            if not text:
-                continue
-            if first_token_at is None:
-                # TTFT 从收到用户消息算起，而不是从模型开始生成算起——
-                # 用户感知的是"我发出去多久后看到第一个字"，含检索时间
-                first_token_at = time.monotonic()
-                metrics.CHAT_TTFT.observe(first_token_at - started_at)
-            parts.append(text)
-            on_delta(text)
-    except Exception as exc:
-        metrics.LLM_CALLS.inc(1, _error_kind(exc))
-        logger.exception("chat 流式执行失败 thread=%s", thread_id)
-        status_code, detail = _friendly_llm_error(exc)
-        raise HTTPException(status_code=status_code, detail=detail) from None
-
-    full = "".join(parts)
-    if not full.strip():
-        logger.warning("chat 生成空回复 thread=%s", thread_id)
-        return _EMPTY_REPLY
-    return full
+        return await executor.stream(thread_id, message, user_id, on_delta)
+    except executor.AgentError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
 
 # ============================================================
 # 业务编排入口（REST / WS 共用）
@@ -475,14 +330,26 @@ async def process_message(
     # 并发闸门只包住 LLM 调用（真正的昂贵资源），不包落库：
     # 落库是毫秒级操作，限它反而会在繁忙时丢掉用户消息
     guard = ratelimit.get_guard()
-    await guard.acquire()
     channel = "ws" if push_reply else "rest"
+    try:
+        await guard.acquire()
+    except ratelimit.BusyError:
+        # 被闸门拦下的请求同样是一次"用户没拿到回复"，
+        # 不计入的话"繁忙率"只能从限流指标侧面猜
+        metrics.CHAT_MESSAGES.inc(1, channel, "busy")
+        raise
     turn_started = time.monotonic()
     try:
         if on_delta is not None:
             text = await _stream_agent(thread_id, message, uid, on_delta)
         else:
             text = await _invoke_agent(thread_id, message, user_id=uid)
+    except Exception:
+        # 失败也要记耗时与结果，否则"对话错误率"在指标上完全不可见——
+        # 只能看到 LLM 层的失败，看不出有多少用户真的没拿到回复
+        metrics.CHAT_DURATION.observe(time.monotonic() - turn_started, channel)
+        metrics.CHAT_MESSAGES.inc(1, channel, "failed")
+        raise
     finally:
         # finally 里释放：LLM 超时/抛异常也必须归还名额，
         # 否则几个失败请求就能把闸门永久占满
@@ -641,10 +508,11 @@ async def history(
     try:
         rows = handoff.get_messages(thread_id)
         if rows:
-            messages = [
-                SessionMessage(role=r["role"], content=r["content"], ts=r["ts"])
-                for r in rows
-            ]
+            # 必须整包透传（SessionMessage(**r)）而不是只挑 role/content/ts：
+            # - id 是前端按主键去重的唯一依据（WS 推送与历史两条路径要能对齐），
+            #   漏掉它会让 step-40.1 修过的"重复气泡"重新出现
+            # - sender_name 是坐席端显示"是谁回复的"的来源，漏掉会退化成"人工坐席"
+            messages = [SessionMessage(**r) for r in rows]
         else:
             # 注意用 aget_state（'读取'模式）——只取快照不推进图执行
             graph = await get_graph()

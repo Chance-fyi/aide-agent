@@ -144,6 +144,21 @@ CREATE INDEX IF NOT EXISTS idx_kb_rebuild_started
     ON kb_rebuild_run (started_at DESC);
 """
 
+# ---- v3：排队时间独立成列 ----
+
+_QUEUED_AT_SQL = """
+-- 为什么需要 queued_at：
+-- 原先队列 FIFO 靠 conversation_status.updated_at 排序，但 updated_at 会被
+-- 三件不同的事改写：转接、接入、以及"用户补发消息时补归属"（set_thread_user）。
+-- 结果是排队中的用户只要补发一句话就被挪到队尾，可能被无限饿死。
+-- 而且 updated_at 同时还要兼职"排队超时判断"（看用户是否还活跃），
+-- 两个语义挤在一列上必然互相干扰。拆出 queued_at 专管"何时进队列"。
+ALTER TABLE conversation_status ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ;
+-- 回填：已在排队中的老数据用 updated_at 近似（迁移前它就是队列排序依据）
+UPDATE conversation_status SET queued_at = updated_at
+    WHERE status = 'queued' AND queued_at IS NULL;
+"""
+
 @dataclass(frozen=True)
 class Migration:
     """一次迁移。
@@ -161,6 +176,7 @@ class Migration:
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline", _BASELINE_SQL),
     Migration(2, "kb_rebuild_run", _KB_REBUILD_SQL),
+    Migration(3, "conversation_queued_at", _QUEUED_AT_SQL),
 )
 
 def _ensure_version_table(conn: psycopg.Connection) -> None:

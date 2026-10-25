@@ -42,8 +42,11 @@ function formatTime(ts) {
  * @param label    角色标签文案覆盖（如用户端把自己的消息标成"你"）
  * @param old      是否旧会话消息（坐席端历史流里非当前 thread 的记录）
  * @param streaming 是否正在流式输出（末尾追加光标；内容为空时也要渲染占位）
+ * @param aborted   流式途中被中断（保留已生成的部分，但标注未完成）
  */
-export function MessageBubble({ message, side = "start", label, old = false, streaming = false }) {
+export function MessageBubble({
+  message, side = "start", label, old = false, streaming = false, aborted = false,
+}) {
   // 空内容不渲染（坐席接入后的无应答轮次）。
   // 例外：流式中的占位气泡内容为空也要渲染——否则用户看到的是"光标没了、
   // 气泡也没出现"的空窗期，直到第一个 delta 到达才有反应
@@ -66,10 +69,13 @@ export function MessageBubble({ message, side = "start", label, old = false, str
         {time && <time className="mono" dateTime={message.ts}>{time}</time>}
         {old && <span className="mono">历史</span>}
       </div>
-      <div className="bubble">
+      <div className={`bubble${aborted ? " bubble--aborted" : ""}`}>
         {message.content}
         {/* 流式光标：纯装饰，读屏由外层 aria-live 播报整段内容 */}
         {streaming && <span className="caret" aria-hidden="true" />}
+        {/* 中断标注：告诉用户这段没生成完（且刷新后会消失），
+            而不是让人对着半句话猜是不是系统坏了 */}
+        {aborted && <span className="aborted-tag">生成中断</span>}
       </div>
     </div>
   );

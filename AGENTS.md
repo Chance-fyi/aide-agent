@@ -38,6 +38,7 @@
 |---|---|---|
 | 消息角色 `chat_message.role` | `user` / `agent`(智能客服) / `human`(人工坐席) | `app/api/chat.py` 的 `ROLE_*` |
 | 会话状态 `conversation_status.status` | `active` / `queued` / `in_service` / `closed` | `app/agents/handoff.py` 的 `STATUS_*` |
+| 排队顺序依据 | `conversation_status.queued_at`（进队列时刻），**不是** `updated_at` | `handoff.list_live_threads` |
 | 账号角色 `app_user.role` | `user` / `agent` | `app/core/security.py` 的 `ROLE_*` |
 | WS 事件类型 | `ready` `message` `sent` `status` `queue_changed` `error` `pong` `reply_start` `reply_delta` `reply_end` | `app/api/ws.py` 顶部文档字符串 |
 
@@ -59,6 +60,7 @@ app/
     migrations.py    # 数据库迁移：版本表 + 有序迁移列表（DDL 的唯一来源）
     ratelimit.py     # 限流（滑动窗口）+ 并发闸门（保护 LLM 与连接池）
     metrics.py       # 聚合指标：计数器/仪表/直方图 + 跨进程合并 + HTTP 中间件
+    db.py            # 同步 Postgres 连接池（业务表读写统一走这里）
     hub.py           # WebSocket 连接中心：寻址推送、每连接 outbox
     bus.py           # 跨进程事件总线（Postgres LISTEN/NOTIFY，zlib+base64 编码）
     llm.py guardrails.py security.py users.py tracing.py
@@ -70,6 +72,7 @@ app/
     auth.py deps.py schemas.py debug_routes.py
   agents/
     graph.py         # LangGraph 图（单 Agent + tool calling）
+    executor.py      # Agent 执行（非流式/流式）+ LLM 异常分类
     handoff.py       # 转接状态机 + 会话记录表（业务事实的唯一源）
     summarize.py     # 上下文摘要
     runtime.py       # 图与 Checkpointer 生命周期
@@ -151,9 +154,16 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
   状态存进程内存时多 worker 会读到"空闲"并允许并发。见 `rag/rebuild.py`。
 - **状态查询要在一次快照里取完**。分两次查库会返回自相矛盾的结果
   （`job.status=running` + `running=false`），前端据此停轮询却仍显示进行中。
-- **改执行路径要全局搜打桩点**。WS 自助问答从 `_invoke_agent` 改成
-  `_stream_agent` 后，旧测试仍打桩前者 → 打桩静默失效 → 测试真的去调
-  LLM 和 Milvus，表现为"卡死不返回"而不是失败。改路径前先 `grep` 测试里的 monkeypatch。
+- **改执行路径要全局搜打桩点**。踩过两次：`_invoke_agent` → `_stream_agent`
+  切换、`get_graph` 从 `chat.py` 移到 `executor.py`。`monkeypatch` 打的是
+  具体模块里的名字，路径一变就静默失效 → 测试真的去连 LLM/Milvus，
+  表现为"卡死/超时"而不是断言失败。改路径前先 `grep` 测试里的 monkeypatch。
+- **一个时间字段不要承担两个语义**。`updated_at` 曾同时当"队列排序依据"和
+  "超时依据"，导致用户补发消息就被挪到队尾、且超时永不生效。
+  排队用 `queued_at`，别复用。
+- **同步 DB 调用必须走 `app/core/db.py` 的连接池**，不要写 `psycopg.connect()`。
+  每次新建连接会打满 Postgres（默认 max_connections=100），
+  实测一轮对话原本要 14 条连接。
 - **流式回复不能再次整体推送**。内容已边生成边推过，落库后再推一次会让用户
   看到两条相同内容（id 不同，`mergeMessage` 拦不住）。
 - **指标标签只能是有限枚举**。绝不能把 `thread_id` / `user_id` / 查询文本当标签，

@@ -63,6 +63,10 @@ class EventBus:
         self._listen_task: asyncio.Task | None = None
         self._publish_task: asyncio.Task | None = None
         self._outbox: asyncio.Queue | None = None
+        # 事件循环引用：publish 可能从工作线程调用，必须回到这个循环入队。
+        # 显式保存而不是去读 asyncio.Queue 的私有 `_loop` 属性——
+        # 那是实现细节，随 Python 版本变化（3.10 前 Queue 甚至没有 _loop）
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._on_event = None
         self._running = False
         # LISTEN 真正生效的信号。为什么需要：start() 里 create_task 之后
@@ -98,6 +102,7 @@ class EventBus:
         self._on_event = on_event
         self._outbox = asyncio.Queue(maxsize=1000)
         self._listening = asyncio.Event()   # 绑定当前事件循环（见 __init__ 注释）
+        self._loop = asyncio.get_running_loop()
         try:
             # 启动前先探一次连通性：连不上就明确降级，不要让后台任务反复报错
             await self._probe()
@@ -137,6 +142,7 @@ class EventBus:
         self._listen_task = None
         self._publish_task = None
         self._outbox = None
+        self._loop = None
         if self._listening is not None:
             self._listening.clear()
 
@@ -161,8 +167,9 @@ class EventBus:
             return
 
         event = {"origin": self.origin, "target": target, **fields}
-        loop = self._outbox._loop if hasattr(self._outbox, "_loop") else None
-        # 推送可能来自工作线程（LangGraph 同步节点），必须回到事件循环入队
+        loop = self._loop
+        # 推送可能来自工作线程（LangGraph 同步节点），必须回到事件循环入队；
+        # 跨线程直接操作 asyncio.Queue 会叫不醒正在等待的消费协程
         if loop is not None and loop.is_running():
             try:
                 loop.call_soon_threadsafe(self._enqueue, event)

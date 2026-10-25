@@ -4,6 +4,7 @@
 每个用例用随机 thread_id，互不污染。
 """
 
+import time
 import uuid
 
 import psycopg
@@ -13,12 +14,18 @@ from app.core.config import get_settings
 
 
 def _set_updated_at(tid: str, minutes_ago: float) -> None:
-    """直接改 updated_at，模拟"排队了很久"（跳过真实等待）。"""
+    """把时间戳回拨，模拟"排队了很久"（跳过真实等待）。
+
+    同时改 queued_at 与 updated_at：排队超时现在以 **queued_at**（进队列时刻）
+    为准，updated_at 只是"最后变化时间"。两个都拨回才符合"很久之前就排队了"。
+    """
     with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
         conn.execute(
-            "UPDATE conversation_status SET updated_at = now() - (%s * interval '1 minute')"
+            "UPDATE conversation_status"
+            " SET updated_at = now() - (%s * interval '1 minute'),"
+            "     queued_at  = now() - (%s * interval '1 minute')"
             " WHERE thread_id = %s",
-            (minutes_ago, tid),
+            (minutes_ago, minutes_ago, tid),
         )
 
 def test_ensure_table_idempotent():
@@ -118,3 +125,58 @@ def test_sweep_timed_out_reverts_only_old_queued():
 def test_sweep_empty_returns_empty():
     """没有超时会话时返回空列表，不报错。"""
     assert handoff.sweep_timed_out() is not None
+
+def test_queue_fifo_not_broken_by_user_followup_messages():
+    """排队 FIFO 不能被"用户补发消息"打乱。
+
+    回归一个真实 bug：`set_thread_user`（每条消息都会调用）顺手刷新了
+    `updated_at`，而队列原先按 `updated_at ASC` 排序 —— 于是排队中的用户
+    只要补发一句话就被挪到队尾，可能被无限饿死。
+
+    修法：排队顺序改按 `queued_at`（进队列时刻），且归属写入不再碰时间戳。
+    """
+    tid_first = str(uuid.uuid4())
+    tid_second = str(uuid.uuid4())
+    handoff.mark_pending_human(tid_first, reason="先转接")
+    time.sleep(0.05)
+    handoff.mark_pending_human(tid_second, reason="后转接")
+
+    def order():
+        ids = [t["thread_id"] for t in handoff.list_live_threads()]
+        return [x for x in ids if x in (tid_first, tid_second)]
+
+    assert order() == [tid_first, tid_second], "初始应为先进先出"
+
+    # 模拟先排队那位补发消息（process_message 会调 set_thread_user 补归属）
+    handoff.set_thread_user(tid_first, 12345)
+    time.sleep(0.05)
+
+    assert order() == [tid_first, tid_second], (
+        "补发消息不应改变排队顺序（否则该用户会被挤到队尾）"
+    )
+
+def test_queued_at_not_reset_by_repeated_transfer():
+    """重复触发转接不重置排队时间。
+
+    否则用户反复触发转接就能让排队超时永不生效（一直"刚进队列"）。
+    """
+    tid = str(uuid.uuid4())
+    handoff.mark_pending_human(tid, reason="第一次")
+    first = _get_queued_at(tid)
+
+    time.sleep(0.05)
+    handoff.mark_pending_human(tid, reason="又触发一次")
+    assert _get_queued_at(tid) == first, "已在排队中时不应刷新 queued_at"
+
+    # 离开队列后再进来，应拿到新的排队时间
+    handoff.agent_accept(tid, "坐席", agent_id=1)
+    assert _get_queued_at(tid) is None, "接入后应清空排队时间"
+    handoff.mark_pending_human(tid, reason="重新转接")
+    assert _get_queued_at(tid) > first, "重新进队列应刷新排队时间"
+
+def _get_queued_at(tid: str):
+    with psycopg.connect(get_settings().postgres_dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT queued_at FROM conversation_status WHERE thread_id = %s", (tid,)
+        ).fetchone()
+    return row[0] if row else None

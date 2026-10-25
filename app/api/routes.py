@@ -17,7 +17,7 @@ from app.api.schemas import (
     AgentUserHistoryResponse,
     SessionMessage,
 )
-from app.core import metrics
+from app.core import db, metrics
 from app.core.bus import bus
 from app.core.config import get_settings
 from app.core.hub import hub
@@ -44,6 +44,8 @@ async def health():
         "llm_model": s.llm_model,
         "milvus": s.milvus_uri,
         "event_bus": bus_info,
+        # 同步业务连接池：available 长期为 0 说明并发把池占满了，该扩池或排查慢查询
+        "db_pool": db.stats(),
     }
 
 

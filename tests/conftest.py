@@ -67,3 +67,17 @@ async def client():
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_db_pool_at_exit():
+    """会话结束时关闭同步连接池。
+
+    为什么需要：psycopg_pool 的 ConnectionPool 在 __del__ 里 join 内部线程，
+    而解释器退出阶段不允许 join → 会刷出
+    "PythonFinalizationError: cannot join thread at interpreter shutdown"。
+    测试用 ASGITransport 不跑 lifespan，所以不会有人替我们关它。
+    """
+    yield
+    from app.core import db
+
+    db.close()

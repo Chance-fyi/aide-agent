@@ -1255,3 +1255,15 @@ input { font: inherit; color: inherit; }
   .metric { min-width: 90px; padding: 8px 10px; }
   .metric-value { font-size: 17px; }
 }
+
+/* 流式中断：半截内容保留但明确标注"没生成完"。
+   不加这个标注的话，用户会对着一句断掉的话猜是系统坏了还是就这样 */
+.bubble--aborted { border-left-color: var(--amber) !important; }
+.aborted-tag {
+  display: inline-block;
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--amber);
+  white-space: nowrap;
+}
