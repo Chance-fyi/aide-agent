@@ -402,7 +402,10 @@ input { font: inherit; color: inherit; }
   padding: 10px 13px;
   font-size: 13.5px;
   line-height: 1.7;
-  white-space: pre-wrap;      /* 保留后端回复里的换行 */
+  /* 正文改由 Markdown 渲染器输出块级元素（p/ul/ol），
+     所以这里不能再 pre-wrap —— 否则块之间的换行会被重复放大。
+     换行由渲染器用 <br> 与块元素表达。 */
+  white-space: normal;
   word-break: break-word;
   color: var(--ink-900);
 }
@@ -1299,3 +1302,109 @@ input { font: inherit; color: inherit; }
   color: var(--amber);
   white-space: nowrap;
 }
+
+/* ==========================================================================
+   Markdown 正文排版
+
+   LLM 实际只用到 **小标题** / - 列表 / 1. 列表 / 行内粗体，
+   所以样式也只针对这几种做，不铺一整套文档样式。
+   原则：块间距用 margin 的"单向向下"（不用 gap），
+   避免气泡上下留白不对称。
+   ========================================================================== */
+
+/* 段落：气泡内首尾块去掉外边距，避免气泡被"撑胖" */
+.md-p { margin: 0; }
+.md-p + .md-p { margin-top: 8px; }
+
+/* 整行粗体 → 小标题。给一点上间距，读起来像分节；
+   首块不需要上间距（它是气泡第一行） */
+.md-label {
+  margin: 12px 0 4px;
+  font-weight: 600;
+  color: var(--ink-900);
+  letter-spacing: 0.01em;
+}
+.bubble > .md-label:first-child { margin-top: 0; }
+
+/* 列表：缩进用 padding-left 而非 list-style-position: inside ——
+   后者会让换行的第二行顶到项目符号下面，读起来很乱 */
+.md-ul, .md-ol {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.md-ul:first-child, .md-ol:first-child { margin-top: 0; }
+.md-ul { list-style: disc; }
+.md-ol { list-style: decimal; }
+.md-ul li, .md-ol li {
+  margin: 3px 0;
+  padding-left: 2px;
+}
+.md-ul li::marker, .md-ol li::marker {
+  /* 项目符号用弱化色：它是结构标记，不该抢内容的注意力 */
+  color: var(--ink-400);
+  font-size: 0.9em;
+}
+.md-ol li::marker {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+/* 标题（LLM 目前不产出，但产出时不能显示成裸 #） */
+.md-heading {
+  margin: 12px 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.bubble > .md-heading:first-child { margin-top: 0; }
+
+/* 引用 */
+.md-quote {
+  margin: 8px 0 0;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--ink-200);
+  color: var(--ink-600);
+}
+
+/* 分隔线：细到几乎只是"一口气"，不做粗重横线 */
+.bubble hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid var(--ink-100);
+}
+
+/* 行内代码：等宽 + 浅底。用 rem 级的 padding 而非 px，
+   避免在行高内显得拥挤 */
+.bubble code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--ink-50);
+  border: 1px solid var(--ink-100);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* 链接：下划线常驻（不只靠颜色区分，色弱也能识别可点击） */
+.bubble a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.bubble a:hover { color: var(--accent-strong); }
+
+/* 用户自己的气泡是深底白字，粗体/代码/链接都要跟着反色 */
+.line--end .bubble .md-label,
+.line--end .bubble strong { color: #fff; }
+.line--end .bubble code {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+.line--end .bubble a { color: #b8e6f0; }
+.line--end .bubble .md-quote {
+  border-left-color: rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.85);
+}
+.line--end .bubble .md-ul li::marker,
+.line--end .bubble .md-ol li::marker { color: rgba(255, 255, 255, 0.6); }
+.line--end .bubble hr { border-top-color: rgba(255, 255, 255, 0.2); }

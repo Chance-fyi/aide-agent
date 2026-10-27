@@ -1,4 +1,5 @@
 import { ROLE } from "../constants";
+import { Markdown } from "../markdown";
 
 /**
  * 一条消息 = 元信息行（角色标签 + 时间）+ 内容块。
@@ -70,9 +71,16 @@ export function MessageBubble({
         {old && <span className="mono">历史</span>}
       </div>
       <div className={`bubble${aborted ? " bubble--aborted" : ""}`}>
-        {message.content}
-        {/* 流式光标：纯装饰，读屏由外层 aria-live 播报整段内容 */}
-        {streaming && <span className="caret" aria-hidden="true" />}
+        {/* 正文按 Markdown 渲染：LLM 实际会输出 **粗体** 与 - 列表，
+            原样展示会让用户看到一堆星号和短横线。
+            渲染器只产出 React 元素（不用 innerHTML），注入面为零。 */}
+        <Markdown
+          text={message.content}
+          streaming={streaming}
+          // 光标交给渲染器挂到**最后一个文本块**末尾：
+          // 消息以列表结尾时光标不会掉到列表下面单独一行
+          trailing={streaming ? <span className="caret" aria-hidden="true" /> : null}
+        />
         {/* 中断标注：告诉用户这段没生成完（且刷新后会消失），
             而不是让人对着半句话猜是不是系统坏了 */}
         {aborted && <span className="aborted-tag">生成中断</span>}
