@@ -318,7 +318,7 @@ function UserChatInner({ auth, onLogout }) {
               <div className="line-meta">
                 <span className="role role--agent">智能客服</span>
               </div>
-              <div className="bubble"><span className="caret" /></div>
+              <div className="bubble bubble--waiting"><span className="caret" /></div>
             </div>
           )}
         </div>
