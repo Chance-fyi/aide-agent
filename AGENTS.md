@@ -166,6 +166,12 @@ uv run python scripts/run_eval.py [--full]                           # 跑评估
   实测一轮对话原本要 14 条连接。
 - **流式回复不能再次整体推送**。内容已边生成边推过，落库后再推一次会让用户
   看到两条相同内容（id 不同，`mergeMessage` 拦不住）。
+  **但"流式无产出"必须整条推**：有些分支不经过 LLM（如关键词兜底转接走
+  `transfer` 节点），一个 token 都没有，不整条推用户端就完全收不到。
+  判断依据是"有没有真的流出过 delta"，不是"是不是流式入口"。
+- **不要用"没有 token"推断"生成失败"**。图的最终 state 才是回复的权威来源，
+  token 流只是它的一种呈现方式。取不到 token 时先读 `on_chain_end`(LangGraph)
+  的 output，再考虑兜底文案。
 - **指标标签只能是有限枚举**。绝不能把 `thread_id` / `user_id` / 查询文本当标签，
   每个新值都是一条新时间序列。HTTP 路径必须过 `normalize_path()`。
 - **单端口多 worker 下 `/metrics` 只落到随机一个 worker**。本项目的指标自带

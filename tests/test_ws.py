@@ -542,3 +542,72 @@ def test_live_reply_does_not_stream(ws_client):
             assert ev["type"] != "reply_start", "已转人工不应走流式"
             if ev["type"] == "sent":
                 return
+
+# ============================================================
+# 回归：转人工话术不能被误判成"空回复"
+# ============================================================
+
+def test_keyword_transfer_streams_no_delta_but_user_gets_reply(ws_client):
+    """关键词兜底转接：流式分支一个 token 都没有，但用户必须收到转接话术。
+
+    回归一个真实 bug：`transfer` 节点直接构造 AIMessage、**不经过 LLM**，
+    所以 `astream_events` 里没有任何 `on_chat_model_stream`。
+    原先的实现看到"parts 为空"就当成模型生成失败，返回
+    "抱歉，刚才的回复没有生成成功"——而且只推给了坐席端，
+    用户端因为既没有 delta 也没有整条推送，**什么都收不到**。
+
+    这条测试同时锁住两件事：
+    1. 话术必须是真正的转接提示，不是 EMPTY_REPLY
+    2. 用户端必须收到它（走普通 message 事件，因为没有流式内容）
+    """
+    auth = _register(ws_client)
+
+    with ws_client.websocket_connect(f"/ws/chat?token={auth['token']}") as ws:
+        _recv_until(ws, "ready")
+        # 走真实链路（关键词兜底，不调用 LLM）
+        ws.send_json({"type": "message", "content": "我要转人工"})
+
+        got = []
+        for _ in range(15):
+            ev = ws.receive_json()
+            got.append(ev["type"])
+            if ev["type"] == "message" and ev["message"]["role"] == "agent":
+                content = ev["message"]["content"]
+                assert "没有生成成功" not in content, (
+                    f"转接话术被误判成空回复兜底文案: {content!r}"
+                )
+                assert "人工" in content, f"应是转接提示，实际: {content!r}"
+                # 必须带服务端 id，前端才能与历史对齐去重
+                assert ev["message"]["id"] is not None
+                return
+        raise AssertionError(f"用户端没收到转接话术，收到的事件: {got}")
+
+def test_agent_side_does_not_see_empty_reply_fallback(ws_client):
+    """坐席端也不该看到"没有生成成功"的兜底文案。
+
+    原 bug 的表现正是坐席端出现这句话（用户端反而看不到）。
+    坐席需要看到的是机器人实际对用户说了什么。
+    """
+    auth = _register(ws_client)
+    agent_token = _agent_token()
+
+    with ws_client.websocket_connect(f"/ws/chat?token={auth['token']}") as user_ws:
+        _recv_until(user_ws, "ready")
+        user_ws.send_json({"type": "message", "content": "我要转人工"})
+        # 等转接完成（拿到 sent 说明本轮处理结束）
+        _recv_until(user_ws, "sent", limit=20)
+        thread_id = _current_thread(auth["username"])
+
+        with ws_client.websocket_connect(f"/ws/agent?token={agent_token}") as agent_ws:
+            _recv_until(agent_ws, "ready")
+            agent_ws.send_json({"type": "watch", "thread_id": thread_id})
+            agent_ws.send_json({"type": "ping"})
+            _recv_until(agent_ws, "pong")
+
+    # 直接查库：落库的 agent 消息不能是兜底文案
+    rows = handoff.get_messages(thread_id)
+    agent_msgs = [r["content"] for r in rows if r["role"] == "agent"]
+    assert agent_msgs, "应有智能客服回复"
+    assert not any("没有生成成功" in c for c in agent_msgs), (
+        f"落库的回复里出现了兜底文案: {agent_msgs}"
+    )

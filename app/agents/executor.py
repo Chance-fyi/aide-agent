@@ -154,12 +154,23 @@ async def stream(
     first_token_at: float | None = None
     model_started_at: float | None = None
     started_at = time.monotonic()
+    # 图执行的最终输出：**没有任何 token 时靠它兜底**。
+    # 关键场景：关键词兜底转接走的是 transfer 节点，它直接构造 AIMessage，
+    # 完全不经过 LLM —— 于是流里一个 token 都没有。若只看 token 就会误判成
+    # "生成空回复"，把正确话术替换成"抱歉，刚才的回复没有生成成功"。
+    final_state: dict | None = None
     try:
         graph = await get_graph()
         async for event in graph.astream_events(
             {"messages": [HumanMessage(content=message)]}, config, version="v2"
         ):
             kind = event["event"]
+            # 顶层链的结束事件带完整最终 state（含全部 messages）
+            if kind == "on_chain_end" and event.get("name") == "LangGraph":
+                output = event["data"].get("output")
+                if isinstance(output, dict) and output.get("messages"):
+                    final_state = output
+                continue
             # LLM 调用指标按事件成对计时，而不是用整个流的总耗时。
             # 为什么必须这样：一轮对话至少调两次模型（工具轮 + 最终轮），
             # 用总耗时会把"检索 + 两次模型"混成一个数，既不能反映单次
@@ -195,7 +206,19 @@ async def stream(
         _raise_agent_error(exc, thread_id, "流式执行")
 
     full = "".join(parts)
-    if not full.strip():
-        logger.warning("chat 生成空回复 thread=%s", thread_id)
-        return EMPTY_REPLY
-    return full
+    if full.strip():
+        return full
+
+    # 一个 token 都没有：可能是"不经过 LLM 的分支"（转接节点等），
+    # 也可能模型真的生成了空内容。先看图的最终输出，那才是权威结果。
+    if final_state:
+        reply = final_state["messages"][-1]
+        text = reply.text if isinstance(reply, AIMessage) else str(reply.content)
+        if text.strip():
+            logger.info(
+                "chat 流式无 token，改用图最终输出（非 LLM 分支）thread=%s", thread_id
+            )
+            return text
+
+    logger.warning("chat 生成空回复 thread=%s", thread_id)
+    return EMPTY_REPLY

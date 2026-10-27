@@ -339,9 +339,20 @@ async def process_message(
         metrics.CHAT_MESSAGES.inc(1, channel, "busy")
         raise
     turn_started = time.monotonic()
+    # 跟踪"是否真的有内容流出去"：流式分支下前端靠 reply_end 收尾，
+    # 而 reply_end 只在收到过 delta 时才发（见 ws.py 的 stream_state）。
+    # 有些分支一个 token 都不产出（关键词兜底转接走 transfer 节点，不经 LLM），
+    # 此时若不整条推送，用户端将**完全收不到回复**。
+    streamed = False
+
+    def _on_delta(chunk: str) -> None:
+        nonlocal streamed
+        streamed = True
+        on_delta(chunk)
+
     try:
         if on_delta is not None:
-            text = await _stream_agent(thread_id, message, uid, on_delta)
+            text = await _stream_agent(thread_id, message, uid, _on_delta)
         else:
             text = await _invoke_agent(thread_id, message, user_id=uid)
     except Exception:
@@ -361,9 +372,13 @@ async def process_message(
 
     saved_agent = _append_safe(thread_id, ROLE_AGENT, text)
     _notify_agents_message(thread_id, ROLE_AGENT, text, saved_agent)
-    # 流式分支下内容已经边生成边推给用户了，这里只落库 + 通知坐席。
-    # 再整条推一次会让用户看到两条相同内容（id 不同，去重拦不住）
-    if push_reply and on_delta is None:
+    # 推送策略：
+    # - 非流式：整条推
+    # - 流式且有 delta：不推（内容已边生成边推过；再推会看到两条相同内容，
+    #   id 不同，前端的 mergeMessage 拦不住）
+    # - 流式但一个 delta 都没有（如关键词兜底转接）：整条推，
+    #   否则用户端什么都收不到
+    if push_reply and not streamed:
         _push_user_message(uid, ROLE_AGENT, text, saved_agent)
 
     # 转接可能在 Agent 执行中发生（LLM 调了转接工具 / 关键词兜底）：
